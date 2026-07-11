@@ -68,6 +68,7 @@ def prices_backfill(days: int) -> None:
 async def _run_prices_backfill(days: int) -> None:
     from sqlalchemy import select
 
+    from trailing_edge.core.config import get_config
     from trailing_edge.core.db import get_session
     from trailing_edge.data.prices import fetch_and_store_prices
     from trailing_edge.models.kap import KapInsiderTransaction
@@ -80,12 +81,31 @@ async def _run_prices_backfill(days: int) -> None:
         )
         tickers = [row[0] for row in result.all()]
 
-    _log.info("prices_backfill_start", ticker_count=len(tickers), days=days)
+    # The benchmark is a price series like any other. Without it every abnormal
+    # return is NULL and the base rate has nothing to report, so it is fetched
+    # alongside the signal universe rather than left to a separate manual step.
+    benchmark = get_config()["signals"]["returns"]["benchmark"]
+    if benchmark not in tickers:
+        tickers.append(benchmark)
+
+    _log.info(
+        "prices_backfill_start",
+        ticker_count=len(tickers),
+        days=days,
+        benchmark=benchmark,
+    )
 
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
 
     results = await fetch_and_store_prices(tickers, start_date, end_date)
+
+    if results.get(benchmark, 0) == 0:
+        click.echo(
+            f"WARNING: benchmark {benchmark} returned no price rows - "
+            "abnormal returns cannot be computed.",
+            err=True,
+        )
 
     successful = sum(1 for v in results.values() if v > 0)
     total_rows = sum(results.values())
@@ -160,13 +180,28 @@ async def _run_base_rate(horizon: int, min_score: float) -> None:
     stats = await compute_base_rate(horizon, min_score)
 
     click.echo(f"\n-- Base Rate: {horizon}d horizon (min score: {min_score}) --")
+    click.echo(f"  Benchmark:              {stats.benchmark_ticker or '-'}")
     click.echo(f"  Total signals:          {stats.total_signals}")
     click.echo(f"  With outcome (priced):  {stats.signals_with_outcome}")
-    click.echo(f"  Hit rate (return > 0):  {stats.hit_rate_pct:.1f}%")
-    click.echo(f"  Avg return:             {stats.avg_return_pct:.2f}%")
-    click.echo(f"  Median return:          {stats.median_return_pct:.2f}%")
-    click.echo(f"  Best:                   {stats.best_return_pct:.2f}%")
-    click.echo(f"  Worst:                  {stats.worst_return_pct:.2f}%")
+    click.echo(
+        f"  Hit rate (AR > 0):      {stats.hit_rate_pct:.1f}%  "
+        f"95% CI [{stats.hit_rate_ci_low_pct:.1f}, {stats.hit_rate_ci_high_pct:.1f}]"
+    )
+    click.echo(f"  Mean abnormal return:   {stats.mean_abnormal_return_pct:+.2f}%")
+    click.echo(f"  Median abnormal return: {stats.median_abnormal_return_pct:+.2f}%")
+    click.echo(f"  t / p:                  {stats.t_stat:.2f} / {stats.p_value:.4f}")
+    click.echo(f"  Best / worst AR:        {stats.best_abnormal_return_pct:+.2f}% / {stats.worst_abnormal_return_pct:+.2f}%")
+    click.echo("")
+    click.echo(f"  VERDICT: {stats.verdict}")
+    if stats.verdict == "INSUFFICIENT_POWER":
+        click.echo(
+            f"  n={stats.signals_with_outcome}, need ~{stats.required_n_for_power}. "
+            "The estimates above are not evidence in either direction."
+        )
+    click.echo(
+        f"  (Raw return would have claimed {stats.mean_raw_return_pct:+.2f}%; "
+        f"the market alone gave {stats.mean_benchmark_return_pct:+.2f}%.)"
+    )
 
 
 # ── graph ─────────────────────────────────────────────────────────────────────

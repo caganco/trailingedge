@@ -158,16 +158,31 @@ async def generate_daily_report(as_of_date: date | None = None) -> DailyReport:
             }
             for c in clusters_sorted
         ],
+        # Returns are market-adjusted (AR = stock - benchmark over the same held
+        # interval). Every figure ships with its interval, its test, and a verdict;
+        # a consumer reading hit_rate_pct without reading verdict is reading noise.
         "base_rates": {
             str(h): {
                 "horizon_days": h,
+                "benchmark_ticker": base_rates[h].benchmark_ticker,
                 "total_signals": base_rates[h].total_signals,
                 "signals_with_outcome": base_rates[h].signals_with_outcome,
+                "verdict": base_rates[h].verdict,
+                "required_n_for_power": base_rates[h].required_n_for_power,
                 "hit_rate_pct": float(base_rates[h].hit_rate_pct),
-                "median_return_pct": float(base_rates[h].median_return_pct),
-                "avg_return_pct": float(base_rates[h].avg_return_pct),
-                "best_return_pct": float(base_rates[h].best_return_pct),
-                "worst_return_pct": float(base_rates[h].worst_return_pct),
+                "hit_rate_ci_95": [
+                    float(base_rates[h].hit_rate_ci_low_pct),
+                    float(base_rates[h].hit_rate_ci_high_pct),
+                ],
+                "mean_abnormal_return_pct": float(base_rates[h].mean_abnormal_return_pct),
+                "median_abnormal_return_pct": float(base_rates[h].median_abnormal_return_pct),
+                "t_stat": float(base_rates[h].t_stat),
+                "p_value": float(base_rates[h].p_value),
+                "best_abnormal_return_pct": float(base_rates[h].best_abnormal_return_pct),
+                "worst_abnormal_return_pct": float(base_rates[h].worst_abnormal_return_pct),
+                # Audit only - not evidence. See signals/abnormal.py.
+                "mean_raw_return_pct": float(base_rates[h].mean_raw_return_pct),
+                "mean_benchmark_return_pct": float(base_rates[h].mean_benchmark_return_pct),
             }
             for h in horizons
         },
