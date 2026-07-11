@@ -45,5 +45,16 @@ signals:
       recency: 0.2
   returns:
     horizons: [5, 20, 60]
+    # Market proxy for the abnormal-return model (signals/abnormal.py).
+    # XU100 = BIST 100, the standard market benchmark in the Borsa Istanbul
+    # event-study literature. Changing this changes what "abnormal" means -
+    # it is a pre-registered methodology choice, not a tuning knob.
+    benchmark: XU100
+    # Refuse to report an edge on an underpowered sample. Detecting a 55% hit
+    # rate against a 50% null at alpha=0.05 with 80% power needs
+    #   n = (1.96 + 0.84)^2 * 0.25 / 0.05^2 ~= 784
+    # Below this, compute_base_rate returns verdict=INSUFFICIENT_POWER and the
+    # point estimates must not be read as evidence either way.
+    min_signals_for_verdict: 784
   price:
     backfill_days: 400

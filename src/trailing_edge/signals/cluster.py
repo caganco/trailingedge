@@ -13,6 +13,7 @@ from trailing_edge.core.db import get_session
 from trailing_edge.core.logging import get_logger
 from trailing_edge.models.kap import KapInsiderTransaction
 from trailing_edge.models.signal import InsiderCluster
+from trailing_edge.signals.roles import resolve_roles_for_ticker, role_coverage
 
 _log = get_logger(__name__)
 
@@ -154,13 +155,27 @@ async def detect_clusters(as_of_date: date | None = None) -> list[InsiderCluster
             ticker_txs[row.ticker].append(row)
 
         cluster_keys: list[tuple[str, date, date]] = []
+        coverage_seen: list[float] = []
 
         for ticker, txs in ticker_txs.items():
             events = _find_cluster_events(txs, window_days, min_count, as_of_date)
+            if not events:
+                continue
+
+            # The KAP insider form carries no job title, so tx.insider_role is
+            # always None. Seniority has to come from the scraped board/executive
+            # roster (person_company_roles). Without this join the seniority term
+            # silently collapses to its 0.5 default for every cluster - see
+            # signals/roles.py.
+            all_names = sorted({t.insider_name for t in txs})
+            resolved = await resolve_roles_for_ticker(ticker, all_names, session)
 
             for window_start, window_end, distinct_insiders, event_txs in events:
                 unique_insiders = sorted(distinct_insiders)
-                insider_roles = [t.insider_role for t in event_txs]
+                insider_roles = [
+                    resolved.get(t.insider_name) or t.insider_role for t in event_txs
+                ]
+                coverage_seen.append(role_coverage(resolved, unique_insiders))
 
                 # Historical mode: recency=1.0 (scored at formation time)
                 # Live mode: recency based on gap from as_of_date to window_end
@@ -219,6 +234,25 @@ async def detect_clusters(as_of_date: date | None = None) -> list[InsiderCluster
                     insider_count=len(distinct_insiders),
                     score=float(score),
                 )
+
+        # A dead role map is not a cosmetic problem: it pins the seniority term
+        # (weight 0.30) at its 0.5 default and reduces cluster_score to a monotone
+        # function of insider_count. That must never again happen quietly.
+        mean_coverage = (
+            sum(coverage_seen) / len(coverage_seen) if coverage_seen else 0.0
+        )
+        if coverage_seen and mean_coverage == 0.0:
+            _log.warning(
+                "role_map_empty",
+                clusters=len(coverage_seen),
+                hint=(
+                    "no insider matched person_company_roles; seniority term is a "
+                    "constant and cluster_score is effectively insider_count alone. "
+                    "Run `kap management backfill` to populate the roster."
+                ),
+            )
+        else:
+            _log.info("role_coverage", mean_pct=round(mean_coverage * 100, 1))
 
         if not cluster_keys:
             _log.info("detect_clusters_done", found=0)

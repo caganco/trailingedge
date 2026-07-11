@@ -80,6 +80,19 @@ class SignalOutcome(Base):
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     exit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    # Actual traded dates, stored so the market adjustment is auditable: the
+    # benchmark is priced on THESE dates, not on its own trading-day offsets.
+    entry_date: Mapped[date | None] = mapped_column(Date)
+    exit_date: Mapped[date | None] = mapped_column(Date)
+
+    # Market adjustment (see signals/abnormal.py). abnormal_return_pct is the
+    # PRIMARY metric; return_pct alone credits market drift and beta to the
+    # signal and must not be reported as evidence of an edge.
+    benchmark_ticker: Mapped[str | None] = mapped_column(String(50))
+    benchmark_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    abnormal_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
     calculated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

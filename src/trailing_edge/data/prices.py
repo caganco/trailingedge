@@ -188,10 +188,33 @@ async def get_price_after_days(
     Uses price_history rows (yfinance already excludes weekends/holidays).
     OFFSET horizon_days - 1: e.g. horizon=5 → OFFSET 4 → 5th row after from_date.
     """
+    price, _ = await get_price_and_date_after_days(
+        ticker, from_date, horizon_days, session=session
+    )
+    return price
 
-    async def _query(s: AsyncSession) -> Decimal | None:
+
+async def get_price_and_date_after_days(
+    ticker: str,
+    from_date: date,
+    horizon_days: int,
+    session: AsyncSession | None = None,
+) -> tuple[Decimal | None, date | None]:
+    """
+    Close price AND its trading date, horizon_days trading days after from_date.
+
+    The date matters for market adjustment: the benchmark return must span the
+    same *calendar* interval the position was actually held, not the same
+    trading-day offsets on the benchmark's own calendar. The two calendars
+    diverge whenever the stock is halted or suspended (e.g. a BIST single-price
+    / VBTS measure), which is exactly the population insider clusters concentrate
+    in - so taking offsets on each series independently would silently compare
+    mismatched windows.
+    """
+
+    async def _query(s: AsyncSession) -> tuple[Decimal | None, date | None]:
         result = await s.execute(
-            select(PriceHistory.close_try)
+            select(PriceHistory.close_try, PriceHistory.price_date)
             .where(
                 PriceHistory.ticker == ticker,
                 PriceHistory.price_date > from_date,
@@ -200,8 +223,10 @@ async def get_price_after_days(
             .offset(horizon_days - 1)
             .limit(1)
         )
-        row = result.scalar_one_or_none()
-        return Decimal(str(row)) if row is not None else None
+        row = result.one_or_none()
+        if row is None:
+            return None, None
+        return Decimal(str(row[0])), row[1]
 
     if session is not None:
         return await _query(session)

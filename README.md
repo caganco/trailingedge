@@ -23,12 +23,23 @@
   wrapper, parses the DKB transaction tables (Turkish-locale numbers,
   Windows-1252 encoded), and stores normalised rows in PostgreSQL with
   cryptographic deduplication.
-- **Measures empirical forward returns** (5/20/60 trading-day horizons)
-  over detected insider-cluster events, computing hit rate, median, and
-  best/worst outcomes - a transparent, replayable base-rate framework.
+- **Measures market-adjusted abnormal returns** (5/20/60 trading-day horizons)
+  over detected insider-cluster events. Entry is t+1 after the KAP disclosure is
+  *public* - never the private transaction date - and every return is measured in
+  excess of XU100 over the same held interval. Estimates ship with a Wilson
+  interval, a t-test, and a power gate that returns `INSUFFICIENT_POWER` rather
+  than a number it cannot support. See [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 - **Generates forensic briefs** (HTML + PDF) per BIST ticker, combining
   insider-transaction history, board-interlock graphs, and (optionally)
   Türkiye Ticaret Sicil Gazetesi cross-references.
+
+> **No edge is claimed.** This is measurement infrastructure, not a strategy. The
+> sample sizes reached so far are far below what is needed to distinguish an edge
+> from chance (~784 events; see `reports/sample/README.md`), and no transaction
+> cost or VBTS tradability filter is applied yet - so any positive figure this
+> pipeline produces is an upper bound, before frictions. The
+> [open issues](docs/METHODOLOGY.md#4-known-open-issues) are documented rather
+> than left for the reader to find.
 
 ## Türkçe özet
 
