@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from sqlalchemy import select
+
 from trailing_edge.core.db import get_session
 from trailing_edge.core.http import RateLimitedClient
 from trailing_edge.core.logging import get_logger
-from trailing_edge.models.kap import ScraperRun
+from trailing_edge.models.kap import KapDisclosure, ScraperRun
 from trailing_edge.scrapers.base import AbstractScraper
 from trailing_edge.scrapers.kap.client import KapClient
 from trailing_edge.scrapers.kap.parser import (
@@ -26,9 +28,20 @@ SCRAPER_NAME = "kap_insider"
 # diagnosis and a later bulk repair pass.
 _QUARANTINE_DIR = Path("reports/parse_failures")
 
-# Pause before re-attempting the disclosures KAP's WAF disconnected on. Long enough
-# for a volume-triggered throttle to lapse, short enough to stay inside the chunk.
-_WAF_COOLDOWN_S = 90
+# Escalating pauses before re-attempting the disclosures KAP's WAF disconnected on.
+#
+# A single 90s cooldown recovered only ~53% of them, so the chunk still finished
+# PARTIAL - and because the resume ledger only counts SUCCESS as done, a PARTIAL month
+# forces a whole extra sweep of the archive on the next pass, during which the WAF drops
+# a fresh handful and the month goes PARTIAL again. That converges, but each round costs
+# a full re-scan (~2 min per already-ingested month, spent almost entirely on
+# disclosure_exists checks).
+#
+# Recovering inside the chunk is strictly cheaper: the throttle is volume-triggered, so
+# waiting longer lifts it, and only the months that actually lost something pay. The
+# ladder ends when everything is recovered - a month reaches SUCCESS, and the ledger
+# never has to come back for it.
+_WAF_COOLDOWNS_S = (90, 240, 600)
 
 
 @dataclass
@@ -52,7 +65,30 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
     def __init__(self, *, backfill: bool = False) -> None:
         self._backfill = backfill
 
-    async def _ingest_one(self, kap: KapClient, disc: dict, counts: _Counts) -> None:
+    async def _already_stored(self, ids: list[str]) -> set[str]:
+        """Which of these disclosure ids are already in the database.
+
+        One query for the whole month. Asking per-disclosure opened a fresh session
+        for each of ~200 filings, which is most of the cost of re-running an
+        already-ingested month - and PARTIAL months get re-run by design.
+        """
+        if not ids:
+            return set()
+        async with get_session() as session:
+            rows = await session.execute(
+                select(KapDisclosure.kap_disclosure_id).where(
+                    KapDisclosure.kap_disclosure_id.in_(ids)
+                )
+            )
+            return set(rows.scalars().all())
+
+    async def _ingest_one(
+        self,
+        kap: KapClient,
+        disc: dict,
+        counts: _Counts,
+        already_stored: set[str],
+    ) -> None:
         """Fetch, parse and store one disclosure.
 
         Transport failures propagate: the caller decides whether to retry or defer.
@@ -60,10 +96,7 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
         """
         kap_disclosure_id = str(disc.get("disclosureIndex", ""))
         is_correction = bool(disc.get("isChanged") or disc.get("isCorrection") or False)
-
-        async with get_session() as session:
-            repo = KapRepository(session)
-            already_exists = await repo.disclosure_exists(kap_disclosure_id)
+        already_exists = kap_disclosure_id in already_stored
 
         if already_exists and not is_correction:
             counts.skipped += 1
@@ -154,6 +187,9 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                 await kap.warmup()
                 disclosures = await kap.fetch_disclosure_list(from_date, to_date)
                 seen = len(disclosures)
+                already_stored = await self._already_stored(
+                    [str(d.get("disclosureIndex", "")) for d in disclosures]
+                )
 
                 # KAP's WAF intermittently disconnects mid-request. Those failures used
                 # to be logged and skipped, dropping the disclosure outright - 12% of
@@ -163,7 +199,7 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                 deferred: list[dict] = []
                 for disc in disclosures:
                     try:
-                        await self._ingest_one(kap, disc, counts)
+                        await self._ingest_one(kap, disc, counts, already_stored)
                     except Exception as exc:
                         deferred.append(disc)
                         _log.warning(
@@ -172,20 +208,28 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                             error=str(exc),
                         )
 
-                if deferred:
+                for attempt, cooldown in enumerate(_WAF_COOLDOWNS_S, start=1):
+                    if not deferred:
+                        break
                     _log.info(
-                        "waf_cooldown", deferred=len(deferred), sleep_s=_WAF_COOLDOWN_S
+                        "waf_cooldown",
+                        attempt=attempt,
+                        deferred=len(deferred),
+                        sleep_s=cooldown,
                     )
-                    await asyncio.sleep(_WAF_COOLDOWN_S)
+                    await asyncio.sleep(cooldown)
                     retrying, deferred = deferred, []
                     for disc in retrying:
                         try:
-                            await self._ingest_one(kap, disc, counts)
+                            await self._ingest_one(kap, disc, counts, already_stored)
                         except Exception as exc:
                             deferred.append(disc)
-                            _log.error(
-                                "disclosure_error",
+                            last = attempt == len(_WAF_COOLDOWNS_S)
+                            _log.log(
+                                40 if last else 30,  # ERROR on the final round, else WARNING
+                                "disclosure_error" if last else "disclosure_deferred",
                                 kap_disclosure_id=str(disc.get("disclosureIndex", "")),
+                                attempt=attempt,
                                 error=str(exc),
                             )
                 lost = len(deferred)

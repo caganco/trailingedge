@@ -99,7 +99,7 @@ def generate_monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
     return chunks
 
 
-async def get_completed_chunks() -> set[tuple[date, date]]:
+async def _chunks_with_status(status: str) -> set[tuple[date, date]]:
     from sqlalchemy import select
 
     from trailing_edge.core.db import get_session
@@ -107,21 +107,25 @@ async def get_completed_chunks() -> set[tuple[date, date]]:
 
     async with get_session() as session:
         stmt = select(ScraperRun.metadata_).where(
-            ScraperRun.status == "SUCCESS",
+            ScraperRun.status == status,
             ScraperRun.metadata_["backfill"].astext == "true",
         )
         rows = (await session.execute(stmt)).scalars().all()
 
-    completed: set[tuple[date, date]] = set()
+    out: set[tuple[date, date]] = set()
     for meta in rows:
         if meta and meta.get("from_date") and meta.get("to_date"):
-            completed.add(
+            out.add(
                 (
                     date.fromisoformat(meta["from_date"]),
                     date.fromisoformat(meta["to_date"]),
                 )
             )
-    return completed
+    return out
+
+
+async def get_completed_chunks() -> set[tuple[date, date]]:
+    return await _chunks_with_status("SUCCESS")
 
 
 async def _run_chunk(from_date: date, to_date: date) -> None:
@@ -181,28 +185,35 @@ async def main_async(
     end = date.today()
     chunks = generate_monthly_chunks(start, end)
     completed = await get_completed_chunks()
+    partial = await _chunks_with_status("PARTIAL")
+
+    todo = [c for c in chunks if c not in completed or (c[0].year, c[0].month) in forced]
+
+    # Untouched months FIRST, months that only need their WAF-dropped stragglers SECOND.
+    #
+    # A PARTIAL month is already 95% ingested - it just lost a handful of filings to a
+    # WAF disconnect. An untouched month has nothing. Replaying the PARTIALs in calendar
+    # order means re-listing and re-checking hundreds of already-stored filings before
+    # any new history lands, and if the WAF drops a fresh straggler the month goes
+    # PARTIAL again - so the archive can be swept repeatedly while the frontier never
+    # moves. Fresh data first; the stragglers are cheap to collect at the end.
+    fresh = [c for c in todo if c not in partial]
+    stragglers = [c for c in todo if c in partial]
+    ordered = fresh + stragglers
 
     _log.info(
         "backfill_start",
         total_chunks=len(chunks),
         already_done=len(completed),
+        fresh=len(fresh),
+        partial_retry=len(stragglers),
         dry_run=dry_run,
         forced_months=len(forced),
     )
 
-    for from_date, to_date in chunks:
-        is_forced = (from_date.year, from_date.month) in forced
-        if (from_date, to_date) in completed and not is_forced:
-            _log.info(
-                "chunk_skip",
-                from_date=from_date,
-                to_date=to_date,
-                reason="already_ingested",
-            )
-            continue
-
+    for from_date, to_date in ordered:
         if dry_run:
-            _log.info("chunk_dry_run", from_date=from_date, to_date=to_date, forced=is_forced)
+            _log.info("chunk_dry_run", from_date=from_date, to_date=to_date)
             continue
 
         await _run_chunk(from_date, to_date)
