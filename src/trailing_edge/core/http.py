@@ -19,9 +19,23 @@ _log = get_logger(__name__)
 
 
 def _is_retryable(exc: BaseException) -> bool:
+    """Which failures are worth retrying *inline*, right where they happened.
+
+    httpx.RemoteProtocolError ("Server disconnected without sending a response") is
+    deliberately NOT in this set. On KAP that error is not a network blip - it is the
+    WAF cutting the connection, and it does not lift in seconds. Retrying it inline
+    with exponential backoff (the old policy: 5 attempts, 4+8+16+32s) spent up to a
+    minute per occurrence re-poking the block, still failed ~12% of the time, and the
+    caller then dropped the disclosure. Measured over one backfill: 575 such failures,
+    304 minutes burned - 83% of the wall clock - and 12% of the data silently lost.
+
+    A WAF disconnect is instead surfaced immediately so the scraper can defer that
+    disclosure, wait out the throttle once per chunk, and retry it then (see
+    KapInsiderScraper: _WAF_COOLDOWN_S). Fail fast here, recover properly there.
+    """
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (429, 503)
-    return isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError))
+    return isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout))
 
 
 class RateLimitedClient:
