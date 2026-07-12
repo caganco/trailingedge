@@ -59,7 +59,7 @@ import csv
 import io
 import sys
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -94,6 +94,12 @@ C_VOLUME = 29
 # previous close, not a corporate action.
 _CA_EPS = Decimal("0.005")
 
+# BIST's daily price limit is +/-10% (20% for some segments), so a one-day total return
+# beyond this band cannot be a market move. It is a data fault, and chaining it would
+# compound the error through the rest of the series.
+_MIN_DAY_RATIO = Decimal("0.5")
+_MAX_DAY_RATIO = Decimal("2.0")
+
 # Equities only. The bulletin also lists warrants, ETFs, rights and so on.
 EQUITY_TYPE = "MSPOTEQT"
 
@@ -106,6 +112,131 @@ def _dec(raw: str) -> Decimal | None:
         return Decimal(raw)
     except InvalidOperation:
         return None
+
+
+# The bulletin changed format at the end of 2015. Files up to 2015-11 use a narrower,
+# session-level layout with Turkish decimals:
+#
+#   TARIH;SEANS NO;PAZAR;PAY KODU;SERI KODU;MIN;MAX;ONCEKI KAPANIS;KAPANIS;AOF;HACIM;MIKTAR
+#   02.01.2015;1;L;ACSEL;E;50,50;53;52,30;50,95;51,24;...
+#
+# Two rows per ticker per day (one per session), dates as DD.MM.YYYY, commas for decimal
+# points, and no instrument-type column. Read with the modern column map these yield ZERO
+# rows - which is exactly what happened: 2015-01..2015-11 never loaded, 551 of 934
+# clusters had no history to price against, and entries silently snapped to 2015-12-01
+# (the first date that DID load) for signals fired months earlier.
+_LEGACY_DATE = 0
+_LEGACY_SESSION = 1
+_LEGACY_CODE = 3
+_LEGACY_SERIES = 4
+_LEGACY_LOW = 5
+_LEGACY_HIGH = 6
+_LEGACY_PREV_CLOSE = 7
+_LEGACY_CLOSE = 8
+_LEGACY_VOLUME = 11
+
+
+def _tr_dec(raw: str) -> Decimal | None:
+    """Parse a legacy bulletin price. The decimal separator is not stable.
+
+    The pre-2015-12 files switch convention mid-year without changing the header:
+
+        2015-01  ACSEL  min='50,50'  close='50,95'    <- comma is the decimal point
+        2015-11  ACSEL  min='54.50'  close='54.50'    <- dot is the decimal point
+
+    Assuming Turkish convention throughout reads '54.50' as fifty-four thousand five
+    hundred - a thousandfold error that made the chained series overflow a
+    NUMERIC(20,4) column outright. It overflowed, which was lucky: a subtler scale
+    error would have passed straight through into the returns.
+
+    So the separator is inferred, not assumed. A comma always marks the decimal;
+    failing that, a lone dot does. Only a dot with exactly three digits after it, and
+    no comma anywhere, is read as a thousands group.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    if "," in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif raw.count(".") == 1:
+        whole, frac = raw.split(".")
+        if len(frac) == 3 and len(whole) <= 3:
+            raw = whole + frac
+    else:
+        raw = raw.replace(".", "")
+
+    try:
+        v = Decimal(raw)
+    except InvalidOperation:
+        return None
+    return v if v > 0 else None
+
+
+def _rows_from_legacy_csv(text: str) -> list[dict]:
+    """Parse the pre-2015-12 session-level bulletin.
+
+    Sessions collapse to one row per ticker-day: the LAST session's close is the day's
+    close (that is what the next day's ONCEKI KAPANIS refers to), high/low span both
+    sessions, and volume is their sum.
+    """
+    reader = csv.reader(io.StringIO(text), delimiter=";")
+    days: dict[tuple[str, date], dict] = {}
+
+    for parts in reader:
+        if len(parts) <= _LEGACY_VOLUME:
+            continue
+        if parts[_LEGACY_SERIES].strip().upper() != "E":
+            continue
+        try:
+            price_date = datetime.strptime(parts[_LEGACY_DATE].strip(), "%d.%m.%Y").date()
+            session_no = int(parts[_LEGACY_SESSION].strip() or 0)
+        except ValueError:
+            continue
+
+        close = _tr_dec(parts[_LEGACY_CLOSE])
+        if close is None:
+            continue
+        ticker = parts[_LEGACY_CODE].strip().upper()
+        if not ticker:
+            continue
+
+        v = _tr_dec(parts[_LEGACY_VOLUME])
+        volume = int(v) if v is not None else 0
+
+        key = (ticker, price_date)
+        low, high = _tr_dec(parts[_LEGACY_LOW]), _tr_dec(parts[_LEGACY_HIGH])
+        prev = _tr_dec(parts[_LEGACY_PREV_CLOSE])
+
+        cur = days.get(key)
+        if cur is None:
+            days[key] = {
+                "ticker": ticker,
+                "price_date": price_date,
+                "open_try": None,
+                "high_try": high,
+                "low_try": low,
+                "close_try": close,
+                "volume": volume,
+                "_prev_close": prev,
+                "_session": session_no,
+            }
+            continue
+
+        if session_no >= cur["_session"]:
+            cur["close_try"] = close
+            cur["_session"] = session_no
+        if high is not None:
+            cur["high_try"] = high if cur["high_try"] is None else max(cur["high_try"], high)
+        if low is not None:
+            cur["low_try"] = low if cur["low_try"] is None else min(cur["low_try"], low)
+        cur["volume"] = (cur["volume"] or 0) + volume
+
+    out = []
+    for r in days.values():
+        r.pop("_session", None)
+        out.append(r)
+    return out
 
 
 def _rows_from_csv(text: str) -> list[dict]:
@@ -183,8 +314,23 @@ def chain_total_return(rows: list[dict]) -> list[dict]:
                     if prev_recorded and prev_recorded > 0
                     else prev_raw_close
                 )
-                if base > 0:
-                    level = level * raw_close / base
+                # A single day's total return outside this band is not a return, it is a
+                # data fault - a mis-parsed decimal separator, a unit change, a stale
+                # previous close. Chaining it compounds the error through every later
+                # day of the series. Reject the ratio and carry the level forward flat,
+                # loudly: the day is wrong, the rest of the history is not.
+                ratio = raw_close / base if base > 0 else Decimal(1)
+                if not (_MIN_DAY_RATIO <= ratio <= _MAX_DAY_RATIO):
+                    _log.warning(
+                        "implausible_daily_ratio",
+                        ticker=r["ticker"],
+                        date=str(r["price_date"]),
+                        ratio=float(ratio),
+                        close=float(raw_close),
+                        prev=float(base),
+                    )
+                    ratio = Decimal(1)
+                level = level * ratio
                 factor = level / raw_close if raw_close > 0 else factor
             else:
                 r.pop("_prev_close", None)
@@ -211,7 +357,13 @@ def _read_month(path: Path) -> list[dict]:
             raw = zf.read(name)
     else:
         raw = path.read_bytes()
-    return _rows_from_csv(raw.decode("utf-8", errors="replace"))
+    text = raw.decode("utf-8", errors="replace")
+    # Route on the header, not the filename: the layout changed at 2015-12 but the
+    # naming did not.
+    head = text[:400].upper()
+    if "PAY KODU" in head and "SEANS NO" in head:
+        return _rows_from_legacy_csv(text)
+    return _rows_from_csv(text)
 
 
 async def _store(rows: list[dict]) -> int:

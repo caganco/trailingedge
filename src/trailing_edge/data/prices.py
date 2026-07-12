@@ -256,11 +256,18 @@ async def get_price_after_days(
     return price
 
 
+# A trading day the pipeline treats as "the next session" cannot be an arbitrary
+# distance away. Beyond this many calendar days from the reference date, the row is not
+# the next session at all - it is the first session after a hole in the data.
+_MAX_SESSION_GAP_DAYS = 10
+
+
 async def get_price_and_date_after_days(
     ticker: str,
     from_date: date,
     horizon_days: int,
     session: AsyncSession | None = None,
+    max_gap_days: int = _MAX_SESSION_GAP_DAYS,
 ) -> tuple[Decimal | None, date | None]:
     """
     Close price AND its trading date, horizon_days trading days after from_date.
@@ -272,9 +279,35 @@ async def get_price_and_date_after_days(
     / VBTS measure), which is exactly the population insider clusters concentrate
     in - so taking offsets on each series independently would silently compare
     mismatched windows.
+
+    Entry (horizon_days=1) additionally REFUSES a row that is not actually adjacent.
+    The query asks for the first row after from_date, and if the price history simply
+    has no rows near from_date it happily returns one from months later - which the
+    caller then books as a t+1 entry. Measured: 1,278 outcomes were entered on
+    2015-12-01 because that is where the price series began, for signals fired months
+    earlier. Those are not late entries, they are fabricated ones: nobody could have
+    bought at a price that had not printed yet. A gap wider than max_gap_days yields
+    None, and the cluster is dropped as unpriceable - which is what it is.
     """
 
     async def _query(s: AsyncSession) -> tuple[Decimal | None, date | None]:
+        # The FIRST session after from_date anchors the window. If the series has no
+        # row anywhere near from_date, that first row is not "tomorrow" - it is the
+        # far side of a hole, and nothing may be entered against it.
+        first = (
+            await s.execute(
+                select(PriceHistory.price_date)
+                .where(
+                    PriceHistory.ticker == ticker,
+                    PriceHistory.price_date > from_date,
+                )
+                .order_by(PriceHistory.price_date.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if first is None or (first - from_date).days > max_gap_days:
+            return None, None
+
         result = await s.execute(
             select(PriceHistory.close_try, PriceHistory.price_date)
             .where(
