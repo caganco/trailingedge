@@ -88,6 +88,17 @@ _CHUNK_GAP_S = 2
 _RECOVERY_PASSES = 4
 _RECOVERY_PAUSE_S = 1800  # 30 minutes
 
+# Hard ceiling on one month. A chunk is bounded work - list, then two requests per
+# filing at a few per second - so anything past this is not slow, it is stuck.
+#
+# Observed: a run sat silent for THREE HOURS after a 1200s WAF backoff, having emitted
+# no event at all since waking. Every timeout in the stack should have prevented that -
+# httpx is given KAP_TIMEOUT_S, tenacity caps at five attempts - and none did. Rather
+# than guess at which await never returned, the chunk gets a deadline it cannot exceed:
+# on expiry it is abandoned, left PARTIAL for a later pass, and the run moves on.
+# A hang that costs one month is a nuisance; a hang that costs the night is a failure.
+_CHUNK_DEADLINE_S = 900  # 15 minutes
+
 
 def generate_monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
     chunks = []
@@ -156,7 +167,9 @@ async def _run_chunk(from_date: date, to_date: date) -> None:
         )
         try:
             scraper = KapInsiderScraper(backfill=True)
-            result = await scraper.run(from_date, to_date)
+            result = await asyncio.wait_for(
+                scraper.run(from_date, to_date), timeout=_CHUNK_DEADLINE_S
+            )
             _log.info(
                 "chunk_done",
                 from_date=from_date,
@@ -164,6 +177,18 @@ async def _run_chunk(from_date: date, to_date: date) -> None:
                 seen=result.records_seen,
                 inserted=result.records_inserted,
                 skipped=result.records_skipped,
+            )
+            return
+        except TimeoutError as exc:
+            # Not slow - stuck. Abandon the month; the ledger keeps it PARTIAL and a
+            # recovery pass will come back for it.
+            last_exc = exc
+            _log.error(
+                "chunk_deadline_exceeded",
+                from_date=from_date,
+                to_date=to_date,
+                attempt=attempt + 1,
+                deadline_s=_CHUNK_DEADLINE_S,
             )
             return
         except httpx.RemoteProtocolError as exc:
