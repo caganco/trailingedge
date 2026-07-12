@@ -45,6 +45,7 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
         run_id: int = run.id
 
         seen = inserted = updated = skipped = 0
+        empty_dkb = 0  # DKB filings that parsed to zero transactions - see below
         error_msg: str | None = None
 
         try:
@@ -91,6 +92,27 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                         else:
                             body = detail.get("disclosureBody", "") or ""
                             txs = parse_oda_transactions(body, ticker=dto.ticker)
+
+                        # A DKB disclosure that yields no transactions is a parse failure,
+                        # not an empty filing - the whole point of a Pay Alim Satim
+                        # Bildirimi is that it reports at least one trade. Storing the
+                        # disclosure row while quietly dropping its transactions is how
+                        # the pre-2016-06 format gap went unnoticed: every DUY-era filing
+                        # (a free-form attachment, not KAP's structured table) parsed to
+                        # zero, and the ingest reported success. Surface it.
+                        if is_dkb and not txs:
+                            empty_dkb += 1
+                            _log.warning(
+                                "dkb_yielded_no_transactions",
+                                kap_disclosure_id=kap_disclosure_id,
+                                ticker=dto.ticker,
+                                disclosure_type=disc.get("disclosureType"),
+                                published_at=str(dto.published_at),
+                                hint=(
+                                    "DUY-era (pre-2016-06) filings attach a free-form PDF "
+                                    "that parse_dkb_transactions cannot read"
+                                ),
+                            )
 
 
                         async with get_session() as session:
@@ -151,12 +173,23 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                     records_skipped=skipped,
                 )
 
+        # A run that stored disclosures but extracted no transactions from most of them
+        # is a failed run wearing a SUCCESS label. Surface the ratio, not just the counts.
+        if empty_dkb:
+            _log.warning(
+                "dkb_parse_yield_low" if empty_dkb * 2 >= seen else "dkb_parse_partial",
+                seen=seen,
+                empty_dkb=empty_dkb,
+                empty_pct=round(empty_dkb / seen * 100, 1) if seen else 0.0,
+            )
+
         _log.info(
             "scraper_done",
             seen=seen,
             inserted=inserted,
             updated=updated,
             skipped=skipped,
+            empty_dkb=empty_dkb,
         )
         return ScraperRunResult(
             records_seen=seen,

@@ -35,8 +35,24 @@ from trailing_edge.scrapers.kap.insider import KapInsiderScraper
 
 _log = get_logger(__name__)
 
-# ~1,100 DKB disclosures/year measured; ~11 years is what the ~784-event power gate costs.
-DEFAULT_START = date(2015, 1, 1)
+# 2016-06 is the earliest date this pipeline can actually parse, not a preference.
+#
+# KAP's insider filings changed format mid-2016. Measured disclosureType by month:
+#   2016-03 DUY=57   2016-04 DUY=53   2016-05 DUY=138
+#   2016-06 ODA=111  2016-07 ODA=50   2016-08 ODA=108
+#
+# DUY-era filings are a free-form PDF the insider mailed in ("...açıklama ekte yer
+# almaktadır", attachment "nthol2.pdf") - often a scan, with no structured table.
+# parse_dkb_transactions expects KAP's ODA form and extracts nothing from them: a probe
+# run over 2015 stored 50 disclosures and produced ZERO transactions, silently.
+#
+# Starting earlier than this costs hours of PDF downloads and yields no usable rows.
+# Reading DUY-era filings at all would need OCR plus a free-form extractor - a separate
+# project, not a parameter.
+#
+# ~1,100 DKB disclosures/year measured, so 2016-06 → today is ~11,000 filings: well past
+# the ~784 events the power gate in signals/base_rate.py requires.
+DEFAULT_START = date(2016, 6, 1)
 
 # Progressive WAF cooldown: (pre_sleep_seconds, label)
 # If the warmup GET is disconnected, the WAF has IP-throttled us.
