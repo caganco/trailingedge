@@ -13,7 +13,21 @@ _log = get_logger(__name__)
 
 # Matches Turkish formatted numbers: 1.234.567,89 or 1.234 or 18,45 or -2.500.000
 _TR_NUM_RE = re.compile(r"-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]+)?")
-_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+
+# KAP writes the transaction date BOTH ways depending on the filing's vintage:
+#   14.06.2019  (dots)    - filings up to ~2020
+#   07/06/2023  (slashes) - filings from ~2021
+# This pattern used to accept slashes only, so no row in a pre-2021 filing ever anchored
+# and _extract_table_rows returned nothing: every filing before 2021 parsed to ZERO
+# transactions while the ingest reported success. The table was always there - measured
+# side by side, the 2019 and 2023 layouts carry the identical 9-column row - and the only
+# difference was this separator. parse_kap_date already accepted both formats; only this
+# regex was turning four years of history away.
+#
+# A dotted date cannot be confused with a Turkish number: _TR_NUM_RE requires groups of
+# exactly 3 digits after a dot, and "14.06.2019" has 2.
+_DATE_RE = re.compile(r"\b(\d{2}[./]\d{2}[./]\d{4})\b")
+
 _PRICE_RANGE_RE = re.compile(r"([\d]+[,.][\d]+)\s*-\s*([\d]+[,.][\d]+)\s*TL")
 
 # Known Turkish column header aliases per logical field (for header-driven column detection).
@@ -58,9 +72,26 @@ def _extract_table_rows(text: str) -> list[list[str]]:
     """
     # Flatten to a clean token list
     tokens: list[str] = []
+    # One line is normally one cell. But pdfminer sometimes emits two adjacent table cells
+    # on a single line ("174.004.552,79 174.269.552,79"). As one token that fails
+    # _TR_NUM_RE, and the collector below silently *skips* non-numeric tokens - so two
+    # values vanish, every later column shifts left by two, and post_tx_share_count /
+    # post_tx_ownership_pct are read out of the wrong cells. That is worse than a crash:
+    # it yields plausible-looking wrong numbers (the source of the
+    # implausible_ownership_pct warnings, e.g. an ownership percentage of 24.628.606,69).
+    #
+    # Split such a line, but ONLY when every part is a Turkish number. Splitting
+    # unconditionally would shred narrative text too - "18,45 - 18,48 TL" from the price
+    # sentence would yield a numeric token "18,45" that the collector would happily read
+    # as a table column. Requiring the whole line to be numeric keeps prose out.
     for line in text.splitlines():
         line = line.strip().replace("\xa0", "")
-        if line:
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) > 1 and all(_TR_NUM_RE.fullmatch(p.lstrip("-")) for p in parts):
+            tokens.extend(parts)
+        else:
             tokens.append(line)
 
     rows: list[list[str]] = []

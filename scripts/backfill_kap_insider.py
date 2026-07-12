@@ -54,10 +54,22 @@ _log = get_logger(__name__)
 # the ~784 events the power gate in signals/base_rate.py requires.
 DEFAULT_START = date(2016, 6, 1)
 
-# Progressive WAF cooldown: (pre_sleep_seconds, label)
-# If the warmup GET is disconnected, the WAF has IP-throttled us.
-# Retry with increasing waits: 1 min → 10 min → 20 min.
-_WAF_ATTEMPTS = [(60, "attempt_1"), (600, "waf_retry_2"), (1200, "waf_retry_3")]
+# WAF backoff, applied AFTER a block - never before one.
+#
+# This used to be a list of (pre_sleep, label) pairs that the retry loop slept through
+# *before every attempt, including the first*. So every chunk paid a 60s toll even when
+# nothing had gone wrong: over 122 months that is ~2 hours of the run spent asleep on the
+# happy path. That is not WAF protection, it is a tax on success.
+#
+# The escalation ladder itself is kept intact - if KAP's WAF does disconnect the warmup
+# GET (httpx.RemoteProtocolError = IP throttled), back off 1 min, then 10, then 20. The
+# protection is now reactive, which is the only thing a backoff can usefully be.
+_WAF_BACKOFF_S = [60, 600, 1200]
+
+# A courtesy gap between chunks so a long backfill does not arrive as one unbroken
+# burst. Small enough to be irrelevant to the runtime (122 x 2s = ~4 min), unlike the
+# 60s it replaces.
+_CHUNK_GAP_S = 2
 
 
 def generate_monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
@@ -103,11 +115,24 @@ async def get_completed_chunks() -> set[tuple[date, date]]:
 
 
 async def _run_chunk(from_date: date, to_date: date) -> None:
-    """Run one chunk with progressive WAF-cooldown retries."""
+    """Run one chunk, backing off only if the WAF actually blocks us."""
     last_exc: Exception | None = None
-    for pre_sleep, label in _WAF_ATTEMPTS:
-        _log.info("chunk_start", from_date=from_date, to_date=to_date, stage=label)
-        await asyncio.sleep(pre_sleep)
+
+    for attempt in range(len(_WAF_BACKOFF_S) + 1):
+        if attempt:
+            backoff = _WAF_BACKOFF_S[attempt - 1]
+            _log.warning(
+                "chunk_waf_backoff",
+                from_date=from_date,
+                to_date=to_date,
+                attempt=attempt + 1,
+                sleep_s=backoff,
+            )
+            await asyncio.sleep(backoff)
+
+        _log.info(
+            "chunk_start", from_date=from_date, to_date=to_date, attempt=attempt + 1
+        )
         try:
             scraper = KapInsiderScraper(backfill=True)
             result = await scraper.run(from_date, to_date)
@@ -121,16 +146,18 @@ async def _run_chunk(from_date: date, to_date: date) -> None:
             )
             return
         except httpx.RemoteProtocolError as exc:
+            # Warmup GET disconnected -> KAP's WAF has IP-throttled us.
             last_exc = exc
             _log.warning(
                 "chunk_waf_blocked",
                 from_date=from_date,
                 to_date=to_date,
-                stage=label,
+                attempt=attempt + 1,
                 error=str(exc),
             )
+
     raise RuntimeError(
-        f"Chunk {from_date}-{to_date} failed after {len(_WAF_ATTEMPTS)} WAF retries"
+        f"Chunk {from_date}-{to_date} failed after {len(_WAF_BACKOFF_S)} WAF backoffs"
     ) from last_exc
 
 
@@ -169,6 +196,7 @@ async def main_async(
             continue
 
         await _run_chunk(from_date, to_date)
+        await asyncio.sleep(_CHUNK_GAP_S)
 
     _log.info("backfill_complete", dry_run=dry_run)
 
