@@ -35,24 +35,34 @@ from trailing_edge.scrapers.kap.insider import KapInsiderScraper
 
 _log = get_logger(__name__)
 
-# 2016-06 is the earliest date this pipeline can actually parse, not a preference.
+# 2015-01 is where the documents stop having a table to read, measured - not a preference.
 #
-# KAP's insider filings changed format mid-2016. Measured disclosureType by month:
-#   2016-03 DUY=57   2016-04 DUY=53   2016-05 DUY=138
-#   2016-06 ODA=111  2016-07 ODA=50   2016-08 ODA=108
+# An earlier version of this comment blamed the DUY/ODA disclosureType split and set the
+# floor at 2016-06. That was wrong, and worth recording because the mistake was a
+# confound: a 2015 backfill did produce zero transactions, but the date-separator bug in
+# parser._DATE_RE would have zeroed those years regardless of their format. Two causes,
+# one symptom. Re-probing with the fixed parser separates them:
 #
-# DUY-era filings are a free-form PDF the insider mailed in ("...açıklama ekte yer
-# almaktadır", attachment "nthol2.pdf") - often a scan, with no structured table.
-# parse_dkb_transactions expects KAP's ODA form and extracts nothing from them: a probe
-# run over 2015 stored 50 disclosures and produced ZERO transactions, silently.
+#   year  docs with a table   parsed   type
+#   2013         0/3            0%     DUY   <- genuinely no table in the document
+#   2014         0/3            0%     DUY   <- genuinely no table
+#   2015         3/3          100%     DUY   <- parses fine; DUY was never the problem
+#   2016         1/3           33%     ODA
 #
-# Starting earlier than this costs hours of PDF downloads and yields no usable rows.
-# Reading DUY-era filings at all would need OCR plus a free-form extractor - a separate
-# project, not a parameter.
+# So the format label was a red herring: DUY-era 2015 filings carry the same structured
+# table as a modern one. What actually ends is the table itself - 2013/2014 filings are
+# a free-form PDF the insider mailed in ("...açıklama ekte yer almaktadır", attachment
+# "nthol2.pdf"), often a scan, with nothing to extract. Reading those would need OCR plus
+# a free-form extractor: a separate project, not a parameter.
 #
-# ~1,100 DKB disclosures/year measured, so 2016-06 → today is ~11,000 filings: well past
-# the ~784 events the power gate in signals/base_rate.py requires.
-DEFAULT_START = date(2016, 6, 1)
+# If some early-2015 filings do turn out to be table-less, they now surface as
+# dkb_yielded_no_transactions rather than vanishing silently. The floor is a measured
+# claim with a safety net under it, not an assumption.
+#
+# ~1,100 DKB filings/year measured, so 2015-01 → today is ~12,500 filings: well past the
+# ~784 events the power gate in signals/base_rate.py requires, and long enough to test
+# regime-conditionally rather than pooling a decade into one number.
+DEFAULT_START = date(2015, 1, 1)
 
 # WAF backoff, applied AFTER a block - never before one.
 #
