@@ -1,6 +1,7 @@
 """KAP insider scraper orchestrator."""
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from trailing_edge.core.db import get_session
 from trailing_edge.core.http import RateLimitedClient
@@ -18,6 +19,11 @@ from trailing_edge.storage.repository import KapRepository
 _log = get_logger(__name__)
 
 SCRAPER_NAME = "kap_insider"
+
+# DKB PDFs that parsed to zero transactions land here (gitignored under /reports),
+# named by disclosure id, so parse failures keep their evidence for offline
+# diagnosis and a later bulk repair pass.
+_QUARANTINE_DIR = Path("reports/parse_failures")
 
 
 @dataclass
@@ -76,6 +82,7 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                         dto = parse_disclosure_metadata(detail, list_item=disc)
 
                         txs = []
+                        pdf_bytes: bytes | None = None
                         # Route by the list API's disclosureClass (reliable DKB indicator)
                         is_dkb = disc.get("disclosureClass") == "DKB"
                         if is_dkb:
@@ -95,23 +102,25 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
 
                         # A DKB disclosure that yields no transactions is a parse failure,
                         # not an empty filing - the whole point of a Pay Alim Satim
-                        # Bildirimi is that it reports at least one trade. Storing the
-                        # disclosure row while quietly dropping its transactions is how
-                        # the pre-2016-06 format gap went unnoticed: every DUY-era filing
-                        # (a free-form attachment, not KAP's structured table) parsed to
-                        # zero, and the ingest reported success. Surface it.
+                        # Bildirimi is that it reports at least one trade. Surface it,
+                        # and QUARANTINE the PDF: the bytes were already paid for, and
+                        # a failure that keeps its evidence can be diagnosed offline and
+                        # repaired in bulk later, instead of re-fought through the WAF
+                        # one probe at a time.
                         if is_dkb and not txs:
                             empty_dkb += 1
+                            quarantined = None
+                            if pdf_bytes:
+                                _QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+                                quarantined = _QUARANTINE_DIR / f"{kap_disclosure_id}.pdf"
+                                quarantined.write_bytes(pdf_bytes)
                             _log.warning(
                                 "dkb_yielded_no_transactions",
                                 kap_disclosure_id=kap_disclosure_id,
                                 ticker=dto.ticker,
                                 disclosure_type=disc.get("disclosureType"),
                                 published_at=str(dto.published_at),
-                                hint=(
-                                    "DUY-era (pre-2016-06) filings attach a free-form PDF "
-                                    "that parse_dkb_transactions cannot read"
-                                ),
+                                quarantined=str(quarantined) if quarantined else None,
                             )
 
 
