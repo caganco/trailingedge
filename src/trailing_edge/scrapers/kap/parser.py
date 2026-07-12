@@ -306,6 +306,73 @@ def _check_side(
     return None
 
 
+# "...fiyat aralığından 479.593 adet alış işlemi ve/veya 0 adet satış işlemi..."
+# The narrative states the traded quantity in words on every legacy filing. Per-trade
+# narrations list several "N adet" before one direction keyword; the next direction
+# keyword after each match attributes it.
+_NARRATIVE_QTY_RE = re.compile(r"(\d[\d.,]*)\s*adet", re.IGNORECASE)
+_NARRATIVE_DIR_RE = re.compile(r"al[ıi][şsm]|sat[ıi][şsm]", re.IGNORECASE)
+
+
+def _narrative_quantities(text: str) -> tuple[Decimal, Decimal] | None:
+    """(buy_qty, sell_qty) as narrated in the filing's prose, or None."""
+    buy = sell = Decimal(0)
+    found = False
+    for m in _NARRATIVE_QTY_RE.finditer(text):
+        try:
+            qty = parse_turkish_number(m.group(1).rstrip(".,"))
+        except InvalidOperation:
+            continue
+        d = _NARRATIVE_DIR_RE.search(text, m.end())
+        if d is None:
+            continue
+        found = True
+        if d.group(0).lower().startswith("al"):
+            buy += qty
+        else:
+            sell += qty
+    return (buy, sell) if found else None
+
+
+def _exact_triples(numerics: list[Decimal]) -> tuple[Decimal, Decimal]:
+    """Greedy disjoint cover by exact qty*price==amount triples.
+
+    Returns (sum of quantities, sum of amounts) over the cover. Exact Decimal
+    equality is the filter; the qty/price roles are assigned large/small, which
+    holds for every real trade in this corpus (thousands of shares at tens of
+    lira). Used only as corroboration - never as the sole source.
+    """
+    from collections import Counter
+
+    pool = Counter(numerics)
+    sum_q = sum_a = Decimal(0)
+    # Largest amounts first, so real trades claim their cells before small
+    # accidental products (2*3==6) can steal them.
+    candidates = sorted(
+        (
+            (q * p, q, p)
+            for q in pool
+            for p in pool
+            if q > p > 0
+            and _LEGACY_PRICE_MIN <= p <= _LEGACY_PRICE_MAX
+            and q >= 1
+        ),
+        key=lambda t: -t[0],
+    )
+    for a, q, p in candidates:
+        if pool[a] <= 0 or pool[q] <= 0 or pool[p] <= 0:
+            continue
+        if q == a or p == a:  # degenerate (price 1.0 etc.) - not evidence
+            continue
+        need = Counter((a, q, p))
+        if any(pool[v] < c for v, c in need.items()):
+            continue
+        pool.subtract(need)
+        sum_q += q
+        sum_a += a
+    return sum_q, sum_a
+
+
 def _parse_legacy_blotter(
     text: str,
     ticker: str,
@@ -366,21 +433,24 @@ def _parse_legacy_blotter(
                 break
         return out[:limit]
 
+    resolved: tuple | None = None  # (buy_qty, sell_qty, buy_amt|None, sell_amt|None, how)
+    reject_reason = "legacy: no totals binding satisfies the checks"
+
     # Two emissions of the totals block exist, distinguished by whether the labels
     # are adjacent. When they are SEPARATED, each label owns the pair that follows
     # it - "TOPLAM ALIŞ / qty / amt / TOPLAM SATIŞ / qty / amt" - in the table's
-    # own header order (nominal before tutar). The old code assumed adjacency,
-    # looked only after the SELL label, found the sell side's lonely zeros, and
-    # rejected the filing as "totals block incomplete" (31 times in month one).
+    # own header order (nominal before tutar). Looking only after the SELL label
+    # finds the sell side's lonely zeros ("totals block incomplete", 31x in month 1).
+    bindings: dict[str, tuple] = {}
     if sell_idx - buy_idx > 1 and buy_idx < sell_idx:
         buy_cells = _numerics_in(lines[buy_idx + 1 : sell_idx], 2)
         sell_cells = _numerics_in(lines[sell_idx + 1 :], 2)
-        if len(buy_cells) < 2 or len(sell_cells) < 2:
-            _log.warning("dkb_row_rejected", reason="legacy: totals block incomplete")
-            return []
-        bindings = {
-            "label-adjacent": (buy_cells[0], sell_cells[0], buy_cells[1], sell_cells[1]),
-        }
+        if len(buy_cells) == 2 and len(sell_cells) == 2:
+            bindings = {
+                "label-adjacent": (buy_cells[0], sell_cells[0], buy_cells[1], sell_cells[1]),
+            }
+        else:
+            reject_reason = "legacy: totals block incomplete"
     else:
         # Adjacent labels: four cells follow, but their ORDER is not stable -
         # pdfminer emits (buy qty, sell qty, buy amt, sell amt) in some files and
@@ -388,10 +458,6 @@ def _parse_legacy_blotter(
         # how columns got silently mis-read before, so it is not guessed: both
         # bindings run the same checks and the one that uniquely survives wins.
         cells = _numerics_in(lines[sell_idx + 1 :], 4)
-        if len(cells) < 4:
-            # Third observed emission: the PER-TRADE quantities come first and the
-            # totals pair only after them. Handled below on the longer window.
-            cells = []
         if len(cells) == 4:
             n1, n2, n3, n4 = cells
             bindings = {
@@ -399,58 +465,81 @@ def _parse_legacy_blotter(
                 "row-major": (n1, n3, n2, n4),     # buy qty, buy amt, sell qty, sell amt
             }
         else:
-            bindings = {}
+            reject_reason = "legacy: totals block incomplete"
+
     survivors = {}
     for name, (bq, sq, ba, sa) in bindings.items():
         if _check_side(bq, ba, buy_range) is None and _check_side(sq, sa, sell_range) is None:
             survivors[name] = (bq, sq, ba, sa)
-
-    if len(survivors) > 1:
-        # Both orders pass only when the bindings agree in substance (e.g. one side
-        # all zeros makes them identical); otherwise the filing is truly ambiguous.
-        vals = list(survivors.values())
-        if vals[0] != vals[1]:
-            _log.warning(
-                "dkb_row_rejected",
-                reason="legacy: totals binding ambiguous",
-                cells=[float(v) for v in next(iter(bindings.values()))],
-            )
-            return []
-
+    if len(survivors) > 1 and len(set(survivors.values())) > 1:
+        # Bindings that both pass but disagree in substance: truly ambiguous.
+        survivors = {}
+        reject_reason = "legacy: totals binding ambiguous"
     if survivors:
-        binding_name, (buy_qty, sell_qty, buy_amt, sell_amt) = next(iter(survivors.items()))
-    else:
-        # Fourth observed emission (quarantined filings 405071, 404639): the
-        # PER-TRADE quantities come first and only then the totals pair -
-        # [186, 133, 5, 155, 479, 0, prices...] where 186+133+5+155 == 479. The
-        # totals pair is findable without knowing the layout: it is the adjacent
-        # pair that EXACTLY equals the sum of every numeric before it. Exact
-        # Decimal equality makes an accidental match effectively impossible; a
-        # position is again accepted only because arithmetic proved it. The trade
-        # AMOUNTS are interleaved beyond recovery in this emission, so the implied
-        # price cannot be computed - price_try stays NULL (the honest value) and
-        # only quantities are stored. Mixed buy+sell filings are skipped here:
-        # without amounts the two directions cannot be range-checked apart.
+        name, (bq, sq, ba, sa) = next(iter(survivors.items()))
+        resolved = (bq, sq, ba, sa, name)
+
+    if resolved is None:
+        # Emission #4 (quarantined 405071, 404639): per-trade quantities first,
+        # totals pair after - [186, 133, 5, 155, 479, 0, ...] where the pair is
+        # findable as the adjacent pair EXACTLY equal to the sum of everything
+        # before it. Trade amounts are interleaved beyond recovery here, so
+        # price_try stays NULL; share_count is what the pipeline needs.
         seq = _numerics_in(lines[sell_idx + 1 :], 16)
-        matches = []
+        matches = set()
         for k in range(2, len(seq) - 1):
             a, b = seq[k], seq[k + 1]
-            if a < 0 or b < 0 or a + b <= 0:
-                continue
-            if (a == 0) != (b == 0):  # exactly one active side
+            if a >= 0 and b >= 0 and a + b > 0 and (a == 0) != (b == 0):
                 if sum(seq[:k]) == a + b:
-                    matches.append((a, b))
-        unique = {m for m in matches}
-        if len(unique) != 1:
-            _log.warning(
-                "dkb_row_rejected",
-                reason="legacy: no totals binding satisfies the checks",
-                cells=[float(v) for v in seq[:6]],
-            )
-            return []
-        buy_qty, sell_qty = unique.pop()
-        buy_amt = sell_amt = None
-        binding_name = "qty-sum"
+                    matches.add((a, b))
+        if len(matches) == 1:
+            bq, sq = matches.pop()
+            resolved = (bq, sq, None, None, "qty-sum")
+
+    if resolved is None:
+        # Emission #5 (dominant in the 2015-Q2+ quarantine): the totals labels sit
+        # BEFORE the table cells entirely, so none of the positional paths apply.
+        # Two order-independent sources remain, and a filing is accepted only when
+        # they agree TO THE KURUŞ:
+        #   - the narrative states the quantities in words ("479.593 adet alış");
+        #   - the table numerics contain either exact qty*price==amount trade
+        #     triples summing to the same quantity, or the narrated totals as cells.
+        # Prose lines are excluded from the table numerics, so the corroboration
+        # is genuinely cross-source, not the narrative confirming itself.
+        narr = _narrative_quantities(text)
+        if narr is not None and narr[0] + narr[1] > 0:
+            nb, ns = narr
+            table_nums: list[Decimal] = []
+            for ln in lines:
+                parts = ln.split()
+                if parts and all(_TR_NUM_RE.fullmatch(p.lstrip("-")) for p in parts):
+                    for p_ in parts:
+                        try:
+                            table_nums.append(parse_turkish_number(p_))
+                        except InvalidOperation:
+                            pass
+
+            tq, ta = _exact_triples(table_nums)
+            single_dir = (nb == 0) != (ns == 0)
+            if tq > 0 and tq == nb + ns and single_dir:
+                # Triples reconstruct the exact narrated volume; their amount sum
+                # gives the average price, which must still clear the range check.
+                rng = buy_range if nb > 0 else (sell_range or buy_range)
+                if _check_side(nb + ns, ta, rng) is None:
+                    resolved = (nb, ns, ta if nb > 0 else None, ta if ns > 0 else None,
+                                "narrative+triples")
+            if resolved is None:
+                cells_present = (nb == 0 or nb in table_nums) and (
+                    ns == 0 or ns in table_nums
+                )
+                if cells_present:
+                    resolved = (nb, ns, None, None, "narrative+totals-cells")
+
+    if resolved is None:
+        _log.warning("dkb_row_rejected", reason=reject_reason)
+        return []
+
+    buy_qty, sell_qty, buy_amt, sell_amt, binding_name = resolved
 
     txs: list[KapInsiderTxDTO] = []
     for tx_type, qty, amt in (("BUY", buy_qty, buy_amt), ("SELL", sell_qty, sell_amt)):

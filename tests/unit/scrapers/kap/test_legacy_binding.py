@@ -111,13 +111,35 @@ def test_two_ranges_bind_buy_first_sell_last():
     assert by["SELL"].price_try == Decimal("9.5000")
 
 
-def test_buy_price_outside_its_own_range_still_rejects():
-    """The range check must keep its teeth: a buy avg of 45 TL against a narrated
-    4,40-4,60 range is a mis-binding and the filing must be rejected."""
+def test_contradicted_price_is_refused_but_corroborated_qty_survives():
+    """A buy amount implying 45 TL against a narrated 4,40-4,60 range: the AMOUNT
+    binding is provably wrong, so no price may be stored. But the QUANTITY is
+    corroborated by two independent sources (the narrative's '1.000 adet' and the
+    1.000 totals cell), so refusing the whole filing would discard knowledge we
+    actually have. Contract: keep what two sources prove, NULL what is contradicted.
+    """
     doc = _doc(
         "1.000\n0\n45.000\n0",
         narrative="4,40 - 4,60 TL fiyat aralığından 1.000 adet alış işlemi",
     )
+    txs = parse(doc)
+    assert len(txs) == 1
+    assert txs[0].transaction_type == "BUY"
+    assert txs[0].share_count == Decimal("1000")
+    assert txs[0].price_try is None  # the contradicted amount must NOT become a price
+
+
+def test_uncorroborated_filing_is_still_rejected():
+    """No narrative quantities, no valid binding, no triples: nothing survives.
+    The fallback must not turn into 'accept anything with a TOPLAM label'."""
+    doc = """SÜREKLİ BİLGİLERE İLİŞKİN ÖZEL DURUM AÇIKLAMASI
+İşlem Tarihi
+15.06.2015
+TOPLAM ALIŞ
+TOPLAM SATIŞ
+7
+11
+"""
     assert parse(doc) == []
 
 
