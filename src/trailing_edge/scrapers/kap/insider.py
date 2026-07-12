@@ -28,20 +28,23 @@ SCRAPER_NAME = "kap_insider"
 # diagnosis and a later bulk repair pass.
 _QUARANTINE_DIR = Path("reports/parse_failures")
 
-# Escalating pauses before re-attempting the disclosures KAP's WAF disconnected on.
+# One short pause before re-attempting the disclosures KAP's WAF disconnected on.
 #
-# A single 90s cooldown recovered only ~53% of them, so the chunk still finished
-# PARTIAL - and because the resume ledger only counts SUCCESS as done, a PARTIAL month
-# forces a whole extra sweep of the archive on the next pass, during which the WAF drops
-# a fresh handful and the month goes PARTIAL again. That converges, but each round costs
-# a full re-scan (~2 min per already-ingested month, spent almost entirely on
-# disclosure_exists checks).
+# This was an escalating ladder (90s, 4min, 10min) that recovered a month fully before
+# moving on. It worked, and it was the wrong place to spend the time: measured over 8
+# chunks, 52% of the entire run was spent asleep inside it - 7.1 minutes per month, some
+# 14 hours across the archive - while the frontier stood still.
 #
-# Recovering inside the chunk is strictly cheaper: the throttle is volume-triggered, so
-# waiting longer lifts it, and only the months that actually lost something pay. The
-# ladder ends when everything is recovered - a month reaches SUCCESS, and the ledger
-# never has to come back for it.
-_WAF_COOLDOWNS_S = (90, 240, 600)
+# The ladder is unnecessary because a blocked request is now nearly free.
+# RemoteProtocolError fails fast (core/http._is_retryable), so a chunk can take whatever
+# the WAF lets through, defer the rest, and finish PARTIAL. The resume ledger counts only
+# SUCCESS as done, so a later pass comes back for exactly the missed disclosures - and the
+# ingest is idempotent, so that re-fetch costs only what was actually lost. Recovery
+# belongs in a second pass over the archive, not in a sleep inside every month.
+#
+# One 90s round is kept: it is cheap and clears roughly half the deferrals immediately
+# (measured 76 -> 34), which keeps the PARTIAL set small enough for the recovery pass.
+_WAF_COOLDOWNS_S = (90,)
 
 
 @dataclass

@@ -81,6 +81,13 @@ _WAF_BACKOFF_S = [60, 600, 1200]
 # 60s it replaces.
 _CHUNK_GAP_S = 2
 
+# After the archive has been swept once, re-sweep whatever the WAF cost us. Silence is
+# the only thing that measurably clears KAP's throttle - 40 minutes of it took the block
+# rate from 61% to 0%, while cutting the request rate did nothing - so each pass opens
+# with a real pause rather than trickling straight back in.
+_RECOVERY_PASSES = 4
+_RECOVERY_PAUSE_S = 1800  # 30 minutes
+
 
 def generate_monthly_chunks(start: date, end: date) -> list[tuple[date, date]]:
     chunks = []
@@ -219,7 +226,56 @@ async def main_async(
         await _run_chunk(from_date, to_date)
         await asyncio.sleep(_CHUNK_GAP_S)
 
-    _log.info("backfill_complete", dry_run=dry_run)
+    if dry_run:
+        _log.info("backfill_complete", dry_run=True)
+        return
+
+    # Recovery passes.
+    #
+    # A month that lost disclosures to the WAF is PARTIAL, and the per-chunk cooldown no
+    # longer waits for it - that wait cost half the runtime while the frontier stood
+    # still. Instead the archive is swept once at speed, and then re-swept for exactly
+    # what was missed. The ingest is idempotent, so a re-swept month re-fetches only its
+    # lost disclosures and skips the hundreds already stored.
+    #
+    # A pause between passes is the one thing that actually clears KAP's throttle
+    # (measured: 40 minutes of silence took the block rate from 61% to 0%, while slowing
+    # the request rate did nothing). Passes stop when nothing is left, when a pass makes
+    # no progress, or after the cap.
+    for attempt in range(1, _RECOVERY_PASSES + 1):
+        remaining = await _chunks_with_status("PARTIAL")
+        remaining = [c for c in remaining if c in set(ordered)]
+        if not remaining:
+            break
+
+        _log.info(
+            "recovery_pass_start",
+            attempt=attempt,
+            months=len(remaining),
+            pause_s=_RECOVERY_PAUSE_S,
+        )
+        await asyncio.sleep(_RECOVERY_PAUSE_S)
+
+        for from_date, to_date in sorted(remaining):
+            await _run_chunk(from_date, to_date)
+            await asyncio.sleep(_CHUNK_GAP_S)
+
+        still = [c for c in await _chunks_with_status("PARTIAL") if c in set(ordered)]
+        _log.info(
+            "recovery_pass_done",
+            attempt=attempt,
+            before=len(remaining),
+            after=len(still),
+        )
+        if len(still) >= len(remaining):
+            _log.warning("recovery_stalled", months=len(still))
+            break
+
+    left = [c for c in await _chunks_with_status("PARTIAL") if c in set(ordered)]
+    if left:
+        _log.warning("backfill_incomplete", partial_months=len(left))
+
+    _log.info("backfill_complete", dry_run=False, partial_months=len(left))
 
 
 @click.command()
