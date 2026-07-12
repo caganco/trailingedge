@@ -100,15 +100,22 @@ def _extract_table_rows(text: str) -> list[list[str]]:
         m = _DATE_RE.fullmatch(tokens[i])
         if m:
             date_tok = tokens[i]
-            # Collect up to 9 numeric tokens after the date
+            # Collect up to 9 numeric tokens after the date. In a real table row the
+            # cells are consecutive, so tolerate at most a few non-numeric interruptions
+            # (page-break artifacts) - an unbounded skip used to let the collector wander
+            # arbitrarily far into the document and stitch together numbers from
+            # unrelated narrative, which is where the 2015-era garbage rows came from.
             numerics: list[str] = []
+            skips_left = 3
             j = i + 1
             while j < len(tokens) and len(numerics) < 9:
                 tok = tokens[j]
                 if _TR_NUM_RE.fullmatch(tok.lstrip("-")):
                     numerics.append(tok)
                 elif tok and not _DATE_RE.fullmatch(tok):
-                    pass  # skip non-numeric, non-date tokens
+                    skips_left -= 1
+                    if skips_left < 0:
+                        break
                 else:
                     break
                 j += 1
@@ -171,12 +178,218 @@ def _relation_type_from_context(text: str) -> str:
     return RelationType.KENDISI
 
 
+# The canonical DKB table row: date + exactly these 9 numeric cells, in this order.
+# Verified identical on 2019 (dotted dates) and 2023+ (slashed dates) filings.
+#   [0] buy nominal   [1] sell nominal   [2] |net|
+#   [3] start nominal [4] end nominal
+#   [5] start capital % [6] start vote % [7] end capital % [8] end vote %
+_ROW_NUMERIC_COUNT = 9
+# Display values are exact decimals; the tolerance only absorbs rounding of the
+# printed cells, not real mismatches.
+_NOMINAL_TOL = Decimal("1")
+
+
+def _map_canonical_row(numerics: list[str]) -> tuple[dict | None, str]:
+    """
+    Map the 9 numeric cells of a table row to transaction fields - or reject.
+
+    Position is the schema here (the form is fixed), but position alone is exactly
+    what produced 21% silently-wrong rows: a missing or merged cell shifts every
+    later column and the row still "parses", yielding share counts like 3.02 and
+    ownership percentages in the millions. So the mapping must PROVE the positions
+    are right before anything is stored, using the arithmetic the form itself
+    guarantees:
+
+        start_nominal + (buy - sell) == end_nominal
+        |buy - sell| == |net|
+        every percentage in [0, 100]
+
+    A shifted layout essentially cannot satisfy the first identity by accident.
+    Rows that fail are rejected with a reason - a rejected row is recoverable from
+    the logs, a silently corrupt one poisons every statistic built on top of it.
+    """
+    if len(numerics) != _ROW_NUMERIC_COUNT:
+        return None, f"expected {_ROW_NUMERIC_COUNT} cells, got {len(numerics)}"
+
+    try:
+        buy, sell, net, start_nom, end_nom = (parse_turkish_number(v) for v in numerics[:5])
+        pcts = [parse_turkish_number(v) for v in numerics[5:9]]
+    except InvalidOperation:
+        return None, "unparseable numeric cell"
+
+    if buy < 0 or sell < 0:
+        return None, "negative buy/sell nominal"
+    if buy == 0 and sell == 0:
+        # A Pay Alim Satim Bildirimi row with no volume is a totals/summary line,
+        # not a transaction. These used to be stored as BUY with share_count=0.
+        return None, "zero volume (summary row)"
+
+    signed_net = buy - sell
+    if abs(abs(signed_net) - abs(net)) > _NOMINAL_TOL:
+        return None, "net column disagrees with buy-sell"
+    if abs(start_nom + signed_net - end_nom) > _NOMINAL_TOL:
+        return None, "start+net != end (shifted columns?)"
+    if any(p < 0 or p > 100 for p in pcts):
+        return None, "percentage outside [0,100]"
+    if signed_net == 0:
+        # Equal intraday buy and sell: no position change, no directional signal.
+        return None, "flat round-trip (net zero)"
+
+    return {
+        "transaction_type": "BUY" if signed_net > 0 else "SELL",
+        "share_count": abs(signed_net),
+        "post_tx_share_count": end_nom,
+        "post_tx_ownership_pct": pcts[2],  # end capital %
+    }, ""
+
+
+# The 2015-2020 filing is a different document: a per-trade blotter
+# (date | Alım/Satım | adet | fiyat | tutar | pre/post holdings), not the netted
+# one-row-per-day form used from ~2021. pdfminer emits its cells in an unstable
+# order - the 2015 fixture interleaves column-major and row-major within one
+# table - so reconstructing individual trades positionally is exactly the kind of
+# guesswork that produced silent corruption before. Two anchors in the document
+# are order-independent and self-checking, and the parser uses only those:
+#
+#   1. The TOPLAM ALIŞ / TOPLAM SATIŞ summary block: the next four numerics are
+#      (buy qty, sell qty, buy amount, sell amount), verified on both era
+#      fixtures against the per-trade rows they summarise.
+#   2. The narrative price range ("1,11 - 1,16 TL fiyat aralığından"): the
+#      implied average price amount/qty must fall inside it.
+#
+# A per-filing net summary is also the honest granularity: the modern form nets
+# same-day trades into one row anyway, and the signal pipeline keys on
+# (insider, ticker, date, direction, size). Post-transaction holdings are NOT
+# extractable order-independently, so they are left NULL rather than guessed.
+_LEGACY_BUY_LABEL = "TOPLAM ALI"  # prefix-match: trailing Ş varies with encoding
+_LEGACY_SELL_LABEL = "TOPLAM SATI"
+_LEGACY_PRICE_MIN = Decimal("0.01")
+_LEGACY_PRICE_MAX = Decimal("100000")
+
+
+def _parse_legacy_blotter(
+    text: str,
+    ticker: str,
+    insider_name: str,
+    relation_type: str,
+) -> list[KapInsiderTxDTO]:
+    lines = [ln.strip().replace("\xa0", "") for ln in text.splitlines() if ln.strip()]
+
+    sell_idx = next(
+        (i for i, ln in enumerate(lines) if ln.upper().startswith(_LEGACY_SELL_LABEL)),
+        None,
+    )
+    if sell_idx is None:
+        _log.warning("dkb_row_rejected", reason="legacy: TOPLAM SATIŞ label not found")
+        return []
+
+    # First four numeric cells after the totals labels: buy qty, sell qty,
+    # buy amount, sell amount (order verified on 2015 and 2018 fixtures).
+    numerics: list[Decimal] = []
+    for ln in lines[sell_idx + 1:]:
+        for tok in ln.split():
+            if _TR_NUM_RE.fullmatch(tok.lstrip("-")):
+                try:
+                    numerics.append(parse_turkish_number(tok))
+                except InvalidOperation:
+                    pass
+        if len(numerics) >= 4:
+            break
+    if len(numerics) < 4:
+        _log.warning("dkb_row_rejected", reason="legacy: totals block incomplete")
+        return []
+    buy_qty, sell_qty, buy_amt, sell_amt = numerics[:4]
+
+    # Latest trade date in the document. The blotter's own rows and the narrative
+    # carry the same dates, so a plain scan is order-independent.
+    dates = []
+    for tok in _DATE_RE.findall(text):
+        try:
+            dates.append(parse_kap_date(tok))
+        except ValueError:
+            pass
+    if not dates:
+        _log.warning("dkb_row_rejected", reason="legacy: no parseable trade date")
+        return []
+    tx_date = max(dates)
+
+    # Narrative price range, if present, bounds the implied average price.
+    range_lo = range_hi = None
+    pm = _PRICE_RANGE_RE.search(text)
+    if pm:
+        try:
+            range_lo = parse_turkish_number(pm.group(1))
+            range_hi = parse_turkish_number(pm.group(2))
+        except InvalidOperation:
+            pass
+
+    txs: list[KapInsiderTxDTO] = []
+    for tx_type, qty, amt in (("BUY", buy_qty, buy_amt), ("SELL", sell_qty, sell_amt)):
+        if qty == 0 and amt == 0:
+            continue
+        if qty <= 0 or amt <= 0:
+            _log.warning(
+                "dkb_row_rejected",
+                reason=f"legacy: {tx_type} qty/amount inconsistent",
+                qty=float(qty),
+                amount=float(amt),
+            )
+            continue
+        avg_price = (amt / qty).quantize(Decimal("0.0001"))
+        if not (_LEGACY_PRICE_MIN <= avg_price <= _LEGACY_PRICE_MAX):
+            _log.warning(
+                "dkb_row_rejected",
+                reason="legacy: implied price implausible",
+                avg_price=float(avg_price),
+            )
+            continue
+        if range_lo is not None and range_hi is not None and range_lo > 0:
+            if not (range_lo * Decimal("0.9") <= avg_price <= range_hi * Decimal("1.1")):
+                _log.warning(
+                    "dkb_row_rejected",
+                    reason="legacy: implied price outside narrative range",
+                    avg_price=float(avg_price),
+                    range_lo=float(range_lo),
+                    range_hi=float(range_hi),
+                )
+                continue
+        txs.append(
+            KapInsiderTxDTO(
+                insider_name=insider_name,
+                relation_type=relation_type,
+                ticker=ticker,
+                transaction_date=tx_date,
+                transaction_type=tx_type,
+                share_count=qty,
+                price_try=avg_price,
+                post_tx_share_count=None,
+                post_tx_ownership_pct=None,
+            )
+        )
+        _log.info(
+            "dkb_legacy_summary",
+            ticker=ticker,
+            tx_type=tx_type,
+            qty=float(qty),
+            avg_price=float(avg_price),
+        )
+    return txs
+
+
 def parse_dkb_transactions(
     pdf_bytes: bytes,
     ticker: str = "",
     insider_name: str = "",
 ) -> list[KapInsiderTxDTO]:
-    """Extract transactions from a Java-unwrapped DKB PDF."""
+    """Extract transactions from a Java-unwrapped DKB PDF.
+
+    Two document generations, routed by an unambiguous marker: filings carrying a
+    TOPLAM ALIŞ/SATIŞ totals block (2015-2020) go through the legacy blotter
+    summary; everything else through the canonical one-row-per-day table. Every
+    accepted row is validated against arithmetic the form itself guarantees;
+    rows that fail are logged as dkb_row_rejected and dropped - never stored
+    with guessed fields.
+    """
     from pdfminer.high_level import extract_text
 
     text = extract_text(io.BytesIO(pdf_bytes))
@@ -185,6 +398,11 @@ def parse_dkb_transactions(
         insider_name = _find_insider_name(text)
 
     relation_type = _relation_type_from_context(text)
+
+    # Legacy (2015-2020) blotter form: route by its unambiguous totals marker.
+    # The modern canonical form never contains it (checked on both modern fixtures).
+    if _LEGACY_BUY_LABEL in text.upper():
+        return _parse_legacy_blotter(text, ticker, insider_name, relation_type)
 
     # Extract price range from narrative
     price_try: Decimal | None = None
@@ -201,56 +419,25 @@ def parse_dkb_transactions(
     for row in rows:
         try:
             tx_date = parse_kap_date(row[0])
-            # columns: date, buy_nominal, sell_nominal, net, start_nom, end_nom,
-            #          start_cap_pct, start_vote_pct, end_cap_pct, end_vote_pct
-            buy_nominal = parse_turkish_number(row[1]) if len(row) > 1 else Decimal(0)
-            sell_nominal = parse_turkish_number(row[2]) if len(row) > 2 else Decimal(0)
+        except ValueError as exc:
+            _log.warning("dkb_row_rejected", reason=str(exc), row=row)
+            continue
 
-            if sell_nominal > 0 and buy_nominal == 0:
-                tx_type = "SELL"
-                share_count = sell_nominal
-            elif buy_nominal > 0 and sell_nominal == 0:
-                tx_type = "BUY"
-                share_count = buy_nominal
-            elif sell_nominal > 0:
-                tx_type = "SELL"
-                share_count = sell_nominal
-            else:
-                tx_type = "BUY"
-                share_count = buy_nominal
+        fields, reason = _map_canonical_row(row[1:])
+        if fields is None:
+            _log.warning("dkb_row_rejected", reason=reason, row=row)
+            continue
 
-            end_nom: Decimal | None = None
-            if len(row) > 5:
-                try:
-                    end_nom = parse_turkish_number(row[5])
-                except InvalidOperation:
-                    pass
-
-            end_cap_pct: Decimal | None = None
-            if len(row) > 8:
-                try:
-                    end_cap_pct = parse_turkish_number(row[8])
-                except InvalidOperation:
-                    pass
-            if end_cap_pct is not None and not (0 <= end_cap_pct <= 100):
-                _log.warning("implausible_ownership_pct", raw=row[8], parsed=float(end_cap_pct))
-                end_cap_pct = None
-
-            txs.append(
-                KapInsiderTxDTO(
-                    insider_name=insider_name,
-                    relation_type=relation_type,
-                    ticker=ticker,
-                    transaction_date=tx_date,
-                    transaction_type=tx_type,
-                    share_count=share_count,
-                    price_try=price_try,
-                    post_tx_share_count=end_nom,
-                    post_tx_ownership_pct=end_cap_pct,
-                )
+        txs.append(
+            KapInsiderTxDTO(
+                insider_name=insider_name,
+                relation_type=relation_type,
+                ticker=ticker,
+                transaction_date=tx_date,
+                price_try=price_try,
+                **fields,
             )
-        except Exception as exc:
-            _log.warning("dkb_row_parse_error", row=row, error=str(exc))
+        )
 
     return txs
 
