@@ -25,7 +25,6 @@ YAML_FILE = ROOT / "config" / "known_companies.yaml"
 
 
 async def main() -> None:
-    from trailing_edge.core.db import get_session, init_db
     from trailing_edge.core.logging import configure_logging, get_logger
 
     configure_logging()

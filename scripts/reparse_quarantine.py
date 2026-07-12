@@ -62,7 +62,11 @@ async def main_async(dry_run: bool) -> None:
                 orphaned += 1
                 continue
 
-            txs = parse_dkb_transactions(pdf_path.read_bytes(), ticker=row.ticker)
+            txs = parse_dkb_transactions(
+                pdf_path.read_bytes(),
+                ticker=row.ticker,
+                published_on=row.published_at.date() if row.published_at else None,
+            )
             if not txs:
                 still_failing += 1
                 continue

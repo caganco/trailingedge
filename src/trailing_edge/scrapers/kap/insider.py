@@ -118,7 +118,10 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                 if obj_id:
                     pdf_bytes = await kap.fetch_pdf(obj_id)
                     txs = parse_dkb_transactions(
-                        pdf_bytes, ticker=dto.ticker, insider_name=""
+                        pdf_bytes,
+                        ticker=dto.ticker,
+                        insider_name="",
+                        published_on=dto.published_at.date() if dto.published_at else None,
                     )
         else:
             body = detail.get("disclosureBody", "") or ""

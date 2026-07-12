@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import re
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from trailing_edge.core.logging import get_logger
@@ -378,6 +379,7 @@ def _parse_legacy_blotter(
     ticker: str,
     insider_name: str,
     relation_type: str,
+    published_on: date | None = None,
 ) -> list[KapInsiderTxDTO]:
     lines = [ln.strip().replace("\xa0", "") for ln in text.splitlines() if ln.strip()]
 
@@ -395,14 +397,27 @@ def _parse_legacy_blotter(
 
     # Latest trade date in the document. The blotter's own rows and the narrative
     # carry the same dates, so a plain scan is order-independent.
+    #
+    # But a blind max() over every date in the document also picks up dates that are
+    # not trade dates at all, and it produced 91 transactions dated AFTER the filing
+    # that reports them - physically impossible, and it tripped the look-ahead guard
+    # in signals/returns.py (which was right to fire). A trade cannot be disclosed
+    # before it happens, so the filing's own publication date is a hard ceiling: any
+    # candidate above it is not a trade date and is discarded.
     dates = []
     for tok in _DATE_RE.findall(text):
         try:
-            dates.append(parse_kap_date(tok))
+            d = parse_kap_date(tok)
         except ValueError:
-            pass
+            continue
+        if published_on is not None and d > published_on:
+            continue
+        dates.append(d)
     if not dates:
-        _log.warning("dkb_row_rejected", reason="legacy: no parseable trade date")
+        _log.warning(
+            "dkb_row_rejected",
+            reason="legacy: no trade date at or before the publication date",
+        )
         return []
     tx_date = max(dates)
 
@@ -578,6 +593,7 @@ def parse_dkb_transactions(
     pdf_bytes: bytes,
     ticker: str = "",
     insider_name: str = "",
+    published_on: date | None = None,
 ) -> list[KapInsiderTxDTO]:
     """Extract transactions from a Java-unwrapped DKB PDF.
 
@@ -587,6 +603,12 @@ def parse_dkb_transactions(
     accepted row is validated against arithmetic the form itself guarantees;
     rows that fail are logged as dkb_row_rejected and dropped - never stored
     with guessed fields.
+
+    ``published_on`` (the filing's own KAP publication date) is a hard ceiling on
+    every transaction date: a trade cannot be disclosed before it happens. Rows
+    dated after it are rejected rather than stored - they are, by construction, a
+    misread date. Omitting it keeps the old permissive behaviour, so callers that
+    genuinely have no publication date still work.
     """
     from pdfminer.high_level import extract_text
 
@@ -600,7 +622,9 @@ def parse_dkb_transactions(
     # Legacy (2015-2020) blotter form: route by its unambiguous totals marker.
     # The modern canonical form never contains it (checked on both modern fixtures).
     if _LEGACY_BUY_LABEL in text.upper():
-        return _parse_legacy_blotter(text, ticker, insider_name, relation_type)
+        return _parse_legacy_blotter(
+            text, ticker, insider_name, relation_type, published_on
+        )
 
     # Extract price range from narrative
     price_try: Decimal | None = None
@@ -619,6 +643,15 @@ def parse_dkb_transactions(
             tx_date = parse_kap_date(row[0])
         except ValueError as exc:
             _log.warning("dkb_row_rejected", reason=str(exc), row=row)
+            continue
+
+        if published_on is not None and tx_date > published_on:
+            _log.warning(
+                "dkb_row_rejected",
+                reason="transaction dated after its own disclosure",
+                tx_date=str(tx_date),
+                published_on=str(published_on),
+            )
             continue
 
         fields, reason = _map_canonical_row(row[1:])

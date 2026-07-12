@@ -43,10 +43,18 @@ from trailing_edge.signals.base_rate import (  # noqa: E402
     EDGE_DETECTED,
     INSUFFICIENT_POWER,
     NEGATIVE_EDGE,
+    SURVIVORSHIP_BIASED,
     compute_base_rate,
 )
 
 _VERDICT_NOTE = {
+    SURVIVORSHIP_BIASED: (
+        "Too many clusters could not be priced at all, and the tickers behind them are "
+        "overwhelmingly DELISTED companies. Their absence deletes the worst outcomes and "
+        "inflates every figure above. This is not a small correction - it is the "
+        "difference between an edge and an artefact. Nothing here is usable until the "
+        "price history covers delisted names."
+    ),
     INSUFFICIENT_POWER: (
         "Sample too small to separate any edge from chance. The estimates above are "
         "NOT evidence in either direction - do not read a hit rate off them."
@@ -114,6 +122,11 @@ async def main() -> None:
             print(
                 f"       n={s.signals_with_outcome}; "
                 f"~{s.required_n_for_power} needed to detect a 55% hit rate at 80% power."
+            )
+        if s.attrition_pct > 0:
+            print(
+                f"       {s.attrition_pct:.1f}% of clusters had no price data and were dropped "
+                "(mostly delisted tickers - a NON-random deletion of bad outcomes)."
             )
         print(
             f"       raw return would have claimed {s.mean_raw_return_pct:+.2f}%, "
