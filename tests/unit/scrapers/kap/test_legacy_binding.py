@@ -123,3 +123,59 @@ def test_buy_price_outside_its_own_range_still_rejects():
 
 def test_incomplete_totals_still_rejected():
     assert parse(_doc("120.000\n526.950")) == []
+
+
+# --- separated labels (each label owns its pair) ------------------------------
+
+def test_separated_labels_bind_per_label():
+    """The emission behind 31 'totals block incomplete' rejections in month one:
+    TOPLAM ALIŞ / qty / amt / TOPLAM SATIŞ / qty / amt. Looking only after the
+    SELL label finds the sell side's lonely zeros and nothing else.
+
+    Cells verbatim from quarantined filing 405865: 395.321 shares bought for
+    256.442,84 TL (avg 0,6487), nothing sold."""
+    doc = """SÜREKLİ BİLGİLERE İLİŞKİN ÖZEL DURUM AÇIKLAMASI
+İşlem Tarihi
+05.01.2015
+Alım
+TOPLAM ALIŞ
+395.321
+256.442,84
+TOPLAM SATIŞ
+0
+0
+"""
+    txs = parse(doc)
+    assert len(txs) == 1
+    assert txs[0].transaction_type == "BUY"
+    assert txs[0].share_count == Decimal("395321")
+    assert txs[0].price_try == Decimal("0.6487")
+
+
+def test_separated_labels_with_both_sides_active():
+    doc = """SÜREKLİ BİLGİLERE İLİŞKİN ÖZEL DURUM AÇIKLAMASI
+İşlem Tarihi
+05.01.2015
+TOPLAM ALIŞ
+1.000
+4.500
+TOPLAM SATIŞ
+2.000
+19.000
+"""
+    txs = parse(doc)
+    by = {t.transaction_type: t for t in txs}
+    assert by["BUY"].share_count == Decimal("1000")
+    assert by["SELL"].share_count == Decimal("2000")
+    assert by["SELL"].price_try == Decimal("9.5000")
+
+
+def test_separated_labels_missing_sell_pair_rejected():
+    doc = """başlık
+05.01.2015
+TOPLAM ALIŞ
+1.000
+4.500
+TOPLAM SATIŞ
+"""
+    assert parse(doc) == []

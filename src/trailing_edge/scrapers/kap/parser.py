@@ -314,37 +314,17 @@ def _parse_legacy_blotter(
 ) -> list[KapInsiderTxDTO]:
     lines = [ln.strip().replace("\xa0", "") for ln in text.splitlines() if ln.strip()]
 
+    buy_idx = next(
+        (i for i, ln in enumerate(lines) if ln.upper().startswith(_LEGACY_BUY_LABEL)),
+        None,
+    )
     sell_idx = next(
         (i for i, ln in enumerate(lines) if ln.upper().startswith(_LEGACY_SELL_LABEL)),
         None,
     )
-    if sell_idx is None:
-        _log.warning("dkb_row_rejected", reason="legacy: TOPLAM SATIŞ label not found")
+    if buy_idx is None or sell_idx is None:
+        _log.warning("dkb_row_rejected", reason="legacy: TOPLAM labels not found")
         return []
-
-    # The four numeric cells after the totals labels. Their ORDER is not stable:
-    # pdfminer emits this table column-major in some files and row-major in others,
-    # giving either (buy qty, sell qty, buy amt, sell amt) or
-    # (buy qty, buy amt, sell qty, sell amt). Guessing the order is how columns got
-    # silently mis-read before, so it is not guessed: both bindings are validated
-    # against the same checks (each active side must have qty>0 AND amount>0, an
-    # implied average price inside the plausible band, and inside the narrated
-    # range when one exists) and the binding that uniquely survives wins. If both
-    # or neither survive, the filing is rejected loudly rather than half-trusted.
-    numerics: list[Decimal] = []
-    for ln in lines[sell_idx + 1:]:
-        for tok in ln.split():
-            if _TR_NUM_RE.fullmatch(tok.lstrip("-")):
-                try:
-                    numerics.append(parse_turkish_number(tok))
-                except InvalidOperation:
-                    pass
-        if len(numerics) >= 4:
-            break
-    if len(numerics) < 4:
-        _log.warning("dkb_row_rejected", reason="legacy: totals block incomplete")
-        return []
-    n1, n2, n3, n4 = numerics[:4]
 
     # Latest trade date in the document. The blotter's own rows and the narrative
     # carry the same dates, so a plain scan is order-independent.
@@ -373,22 +353,58 @@ def _parse_legacy_blotter(
     buy_range = ranges[0] if ranges else None
     sell_range = ranges[-1] if len(ranges) > 1 else None
 
-    bindings = {
-        "column-major": (n1, n2, n3, n4),  # buy qty, sell qty, buy amt, sell amt
-        "row-major": (n1, n3, n2, n4),     # buy qty, buy amt, sell qty, sell amt
-    }
+    def _numerics_in(segment: list[str], limit: int) -> list[Decimal]:
+        out: list[Decimal] = []
+        for ln in segment:
+            for tok in ln.split():
+                if _TR_NUM_RE.fullmatch(tok.lstrip("-")):
+                    try:
+                        out.append(parse_turkish_number(tok))
+                    except InvalidOperation:
+                        pass
+            if len(out) >= limit:
+                break
+        return out[:limit]
+
+    # Two emissions of the totals block exist, distinguished by whether the labels
+    # are adjacent. When they are SEPARATED, each label owns the pair that follows
+    # it - "TOPLAM ALIŞ / qty / amt / TOPLAM SATIŞ / qty / amt" - in the table's
+    # own header order (nominal before tutar). The old code assumed adjacency,
+    # looked only after the SELL label, found the sell side's lonely zeros, and
+    # rejected the filing as "totals block incomplete" (31 times in month one).
+    if sell_idx - buy_idx > 1 and buy_idx < sell_idx:
+        buy_cells = _numerics_in(lines[buy_idx + 1 : sell_idx], 2)
+        sell_cells = _numerics_in(lines[sell_idx + 1 :], 2)
+        if len(buy_cells) < 2 or len(sell_cells) < 2:
+            _log.warning("dkb_row_rejected", reason="legacy: totals block incomplete")
+            return []
+        bindings = {
+            "label-adjacent": (buy_cells[0], sell_cells[0], buy_cells[1], sell_cells[1]),
+        }
+    else:
+        # Adjacent labels: four cells follow, but their ORDER is not stable -
+        # pdfminer emits (buy qty, sell qty, buy amt, sell amt) in some files and
+        # (buy qty, buy amt, sell qty, sell amt) in others. Guessing the order is
+        # how columns got silently mis-read before, so it is not guessed: both
+        # bindings run the same checks and the one that uniquely survives wins.
+        cells = _numerics_in(lines[sell_idx + 1 :], 4)
+        if len(cells) < 4:
+            # Third observed emission: the PER-TRADE quantities come first and the
+            # totals pair only after them. Handled below on the longer window.
+            cells = []
+        if len(cells) == 4:
+            n1, n2, n3, n4 = cells
+            bindings = {
+                "column-major": (n1, n2, n3, n4),  # buy qty, sell qty, buy amt, sell amt
+                "row-major": (n1, n3, n2, n4),     # buy qty, buy amt, sell qty, sell amt
+            }
+        else:
+            bindings = {}
     survivors = {}
     for name, (bq, sq, ba, sa) in bindings.items():
         if _check_side(bq, ba, buy_range) is None and _check_side(sq, sa, sell_range) is None:
             survivors[name] = (bq, sq, ba, sa)
 
-    if not survivors:
-        _log.warning(
-            "dkb_row_rejected",
-            reason="legacy: no totals binding satisfies the checks",
-            cells=[float(v) for v in (n1, n2, n3, n4)],
-        )
-        return []
     if len(survivors) > 1:
         # Both orders pass only when the bindings agree in substance (e.g. one side
         # all zeros makes them identical); otherwise the filing is truly ambiguous.
@@ -397,16 +413,54 @@ def _parse_legacy_blotter(
             _log.warning(
                 "dkb_row_rejected",
                 reason="legacy: totals binding ambiguous",
-                cells=[float(v) for v in (n1, n2, n3, n4)],
+                cells=[float(v) for v in next(iter(bindings.values()))],
             )
             return []
-    binding_name, (buy_qty, sell_qty, buy_amt, sell_amt) = next(iter(survivors.items()))
+
+    if survivors:
+        binding_name, (buy_qty, sell_qty, buy_amt, sell_amt) = next(iter(survivors.items()))
+    else:
+        # Fourth observed emission (quarantined filings 405071, 404639): the
+        # PER-TRADE quantities come first and only then the totals pair -
+        # [186, 133, 5, 155, 479, 0, prices...] where 186+133+5+155 == 479. The
+        # totals pair is findable without knowing the layout: it is the adjacent
+        # pair that EXACTLY equals the sum of every numeric before it. Exact
+        # Decimal equality makes an accidental match effectively impossible; a
+        # position is again accepted only because arithmetic proved it. The trade
+        # AMOUNTS are interleaved beyond recovery in this emission, so the implied
+        # price cannot be computed - price_try stays NULL (the honest value) and
+        # only quantities are stored. Mixed buy+sell filings are skipped here:
+        # without amounts the two directions cannot be range-checked apart.
+        seq = _numerics_in(lines[sell_idx + 1 :], 16)
+        matches = []
+        for k in range(2, len(seq) - 1):
+            a, b = seq[k], seq[k + 1]
+            if a < 0 or b < 0 or a + b <= 0:
+                continue
+            if (a == 0) != (b == 0):  # exactly one active side
+                if sum(seq[:k]) == a + b:
+                    matches.append((a, b))
+        unique = {m for m in matches}
+        if len(unique) != 1:
+            _log.warning(
+                "dkb_row_rejected",
+                reason="legacy: no totals binding satisfies the checks",
+                cells=[float(v) for v in seq[:6]],
+            )
+            return []
+        buy_qty, sell_qty = unique.pop()
+        buy_amt = sell_amt = None
+        binding_name = "qty-sum"
 
     txs: list[KapInsiderTxDTO] = []
     for tx_type, qty, amt in (("BUY", buy_qty, buy_amt), ("SELL", sell_qty, sell_amt)):
         if qty == 0:
             continue
-        avg_price = (amt / qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        avg_price = (
+            (amt / qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            if amt is not None
+            else None
+        )
         txs.append(
             KapInsiderTxDTO(
                 insider_name=insider_name,
@@ -425,7 +479,7 @@ def _parse_legacy_blotter(
             ticker=ticker,
             tx_type=tx_type,
             qty=float(qty),
-            avg_price=float(avg_price),
+            avg_price=float(avg_price) if avg_price is not None else None,
             binding=binding_name,
         )
     return txs
