@@ -88,15 +88,21 @@ _CHUNK_GAP_S = 2
 _RECOVERY_PASSES = 4
 _RECOVERY_PAUSE_S = 1800  # 30 minutes
 
-# Hard ceiling on one month. A chunk is bounded work - list, then two requests per
-# filing at a few per second - so anything past this is not slow, it is stuck.
+# Hard ceiling on one month. A chunk is bounded work - one list call, then two requests
+# per filing at a few per second - so anything past this is not slow, it is stuck.
 #
-# Observed: a run sat silent for THREE HOURS after a 1200s WAF backoff, having emitted
-# no event at all since waking. Every timeout in the stack should have prevented that -
-# httpx is given KAP_TIMEOUT_S, tenacity caps at five attempts - and none did. Rather
-# than guess at which await never returned, the chunk gets a deadline it cannot exceed:
-# on expiry it is abandoned, left PARTIAL for a later pass, and the run moves on.
-# A hang that costs one month is a nuisance; a hang that costs the night is a failure.
+# This is a precaution, not a fix for an observed hang. It was added on the strength of
+# a run that appeared to sit silent for three hours; it had not. structlog timestamps in
+# UTC and the machine clock is UTC+3, so a healthy process looked frozen because the two
+# numbers being compared were not in the same units. The process was working, and it was
+# killed on a bad diagnosis - the same class of error this codebase spent the day
+# catching, made by the person catching them.
+#
+# The deadline stays because a chunk that cannot finish in fifteen minutes is not doing
+# useful work either way, and a run that can lose a month to a hang is better than one
+# that can lose a night. But it is here as a guard against a hang that has never been
+# observed, and this comment says so rather than implying a bug that was really a
+# timezone.
 _CHUNK_DEADLINE_S = 900  # 15 minutes
 
 
