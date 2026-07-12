@@ -1,9 +1,22 @@
 """
-Backfill 12 months of KAP insider transactions.
+Backfill KAP insider transactions.
+
+Default start is 2015-01-01, not because more history is nicer to have but because the
+sample has to clear the power gate: distinguishing a 55% hit rate from a 50% null at
+alpha=0.05 with 80% power needs ~784 cluster events, and below that `compute_base_rate`
+correctly refuses to return a verdict. Measured DKB volume is ~22 disclosures/week
+(~1,100/year), so roughly a decade of history is what the gate costs.
+
+Monthly chunking is safe as of the client's cap-aware bisection: KAP's list endpoint
+truncates at 2,000 rows, keeps the NEWEST, and silently drops the older head of the
+range - a monthly query used to return only the last ~week of that month. See
+`scrapers/kap/client.py::_fetch_list_complete`. Chunks are still monthly here because
+that is the unit the resume ledger (ScraperRun.metadata_) is keyed on; the client
+subdivides beneath it as needed.
 
 Usage:
     uv run scripts/backfill_kap_insider.py
-    uv run scripts/backfill_kap_insider.py --from 2025-01-01
+    uv run scripts/backfill_kap_insider.py --from 2020-01-01
     uv run scripts/backfill_kap_insider.py --dry-run
 """
 import asyncio
@@ -22,7 +35,8 @@ from trailing_edge.scrapers.kap.insider import KapInsiderScraper
 
 _log = get_logger(__name__)
 
-DEFAULT_START = date(2025, 5, 1)
+# ~1,100 DKB disclosures/year measured; ~11 years is what the ~784-event power gate costs.
+DEFAULT_START = date(2015, 1, 1)
 
 # Progressive WAF cooldown: (pre_sleep_seconds, label)
 # If the warmup GET is disconnected, the WAF has IP-throttled us.
@@ -148,7 +162,7 @@ async def main_async(
     "--from",
     "from_date",
     default=str(DEFAULT_START),
-    help="Start date YYYY-MM-DD (default: 2025-05-01)",
+    help=f"Start date YYYY-MM-DD (default: {DEFAULT_START})",
 )
 @click.option("--dry-run", is_flag=True, help="List chunks without executing")
 @click.option(

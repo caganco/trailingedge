@@ -38,7 +38,7 @@
 > from chance (~784 events; see `reports/sample/README.md`), and no transaction
 > cost or VBTS tradability filter is applied yet - so any positive figure this
 > pipeline produces is an upper bound, before frictions. The
-> [open issues](docs/METHODOLOGY.md#4-known-open-issues) are documented rather
+> [open issues](docs/METHODOLOGY.md#5-known-open-issues) are documented rather
 > than left for the reader to find.
 
 ## Türkçe özet
@@ -65,8 +65,10 @@ non-trivial integration problems:
 
 - KAP's undocumented Java object-serialization wrapper around PDF downloads
 - Turkish-locale numeric / date / encoding handling in `pdfminer`
-- Idempotent disclosure ingest under a 2,000-record API cap with
-  windowed pagination
+- Idempotent disclosure ingest under KAP's **silent** 2,000-record result cap -
+  the endpoint truncates to the newest rows and drops the older head of the range
+  with no error and no cursor, so any window that returns *at* the cap is presumed
+  incomplete and bisected until it fits
 - Forensic graph analytics over board-interlock data via NetworkX
 
 ## Quick start
@@ -115,16 +117,26 @@ anonymized - live runs write real KAP names to git-ignored `reports/`):
     }
   ],
   "base_rates": {
-    "5":  { "hit_rate_pct": 44.83, "median_return_pct": -1.87, "signals_with_outcome": 29 },
-    "20": { "hit_rate_pct": 55.17, "median_return_pct":  3.81, "signals_with_outcome": 29 },
-    "60": { "hit_rate_pct": 52.17, "median_return_pct":  0.61, "signals_with_outcome": 23 }
+    "20": {
+      "benchmark_ticker": "XU100",
+      "signals_with_outcome": 0,
+      "verdict": "INSUFFICIENT_POWER",
+      "required_n_for_power": 784,
+      "hit_rate_pct": 0.0,
+      "hit_rate_ci_95": [0.0, 0.0],
+      "mean_abnormal_return_pct": 0.0,
+      "p_value": 1.0
+    }
   }
 }
 ```
 
-Forward returns are measured empirically against actual BIST closes from
-`yfinance` - no synthetic benchmarks, no curve-fitting. Sample sizes are
-intentionally exposed so consumers can judge statistical significance.
+Returns are **market-adjusted** against XU100 over the position's own held interval,
+and entry is t+1 after the disclosure is public. Every estimate carries a Wilson
+interval, a t-test, and a `verdict` - and `INSUFFICIENT_POWER` is a gate, not a
+footnote: below ~784 events the point estimates are not evidence in either direction,
+so the report declines to offer one. See [`reports/sample/README.md`](reports/sample/README.md)
+for what the previous (raw-return, N=29) version of this file claimed and why it was void.
 
 ## Technical highlights
 
@@ -137,7 +149,7 @@ intentionally exposed so consumers can judge statistical significance.
 | Idempotency | `SHA-256(name\|date\|type\|count\|price)` natural key + `ON CONFLICT DO NOTHING` |
 | Audit | `scraper_runs` table with `RUNNING → SUCCESS/FAILED/PARTIAL` state machine |
 | Schema | SQLAlchemy 2.0 typed `Mapped[...]` ORM + Alembic migrations |
-| Pagination | 2,000-record API cap handled via configurable date windows |
+| Result cap | KAP truncates to 2,000 newest rows and silently drops the older head; windows returning *at* the cap are bisected recursively until complete |
 | Names | `rapidfuzz token_sort_ratio` + Turkish ASCII transliteration for cross-source joins |
 | Graph | NetworkX over `board_interlocks` materialised view with `REFRESH CONCURRENTLY` |
 | OCR (optional) | PyMuPDF render @ 300 DPI → Tesseract `-l tur` for Ticaret Sicil gazettes |

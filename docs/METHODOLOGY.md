@@ -114,7 +114,43 @@ Implementation: `signals/base_rate.py`.
 
 ---
 
-## 4. Known open issues
+## 4. Is the dataset even complete?
+
+**It was not, and the gap was invisible.**
+
+KAP's disclosure-list endpoint (`/tr/api/disclosure/members/byCriteria`) returns at most
+**2,000 rows**. On overflow it keeps the **newest** rows and silently drops the older head
+of the requested range — no error, no pagination cursor, no flag of any kind. Measured
+2026-07:
+
+| Requested window | Rows returned | Dates actually covered |
+|---|---:|---|
+| 2024-03-01 → 2024-03-31 | 2,000 | **25–31 March only** |
+| 2024-01-01 → 2024-12-31 | 2,000 | **21–31 December only** |
+| 2024-03-01 → 2024-03-07 | 1,758 | complete (under cap) |
+
+The backfill chunked by **month**. Every monthly chunk therefore came back at the cap, and
+the ingester saw roughly **the last week of each month and discarded the other ~75%** —
+from the project's first run onward. The N=29 sample was never a statement about how much
+insider activity exists; it was an artefact of a silent truncation.
+
+There is no server-side subject filter to lean on: `subjectList` expects member OIDs rather
+than the display string, and a `disclosureClass` key is not honoured — both return zero rows.
+So the range itself has to be narrowed. `KapClient._fetch_list_complete` now treats any
+response that comes back **at** the cap as presumed incomplete, bisects the date range, and
+recurses until every window fits, merging on `disclosureIndex`. A single day denser than the
+cap cannot be narrowed further by date and is logged as `kap_list_day_over_cap` rather than
+returned as if it were whole.
+
+**Reachable sample size.** True volume measured on uncapped (weekly) windows is **~22 DKB
+disclosures/week ≈ 1,100/year**, so 2015–2026 holds on the order of **12,000** insider
+disclosures. The ~784-event power gate is therefore reachable — which it never was under
+the truncated ingest. `backfill_kap_insider.py` defaults to `2015-01-01` for exactly this
+reason.
+
+---
+
+## 5. Known open issues
 
 These are real and unfixed. They are listed so a reader does not have to discover
 them by reading the source.
