@@ -150,38 +150,105 @@ reason.
 
 ---
 
-## 5. Known open issues
+## 5. What was open, and how it closed
 
-These are real and unfixed. They are listed so a reader does not have to discover
-them by reading the source.
+Each of these was listed here as a known gap while it was one. They are kept, with what
+measuring them actually showed - a limitation that is named and then measured away is
+worth as much as one that turns out to be fatal. What is worth nothing is leaving it
+unmeasured and implied.
 
-**Cluster scoring is close to single-factor.** `cluster_score` blends insider count
-(0.50), role seniority (0.30) and recency (0.20). In historical mode recency is pinned
-at 1.0, so 20% of the weight is a constant. Seniority is resolved by joining the KAP
-board/executive roster (`signals/roles.py`) — but where the roster does not cover an
-insider, seniority falls back to its 0.5 default. When coverage is 0 the score reduces
-to a monotone function of `insider_count` alone. `detect_clusters` now logs
-`role_map_empty` loudly in that case; it used to happen silently.
+### Transaction cost - CLOSED, and it is the binding constraint
 
-**No routine/opportunistic split.** Cohen, Malloy & Pomorski (2012), *Decoding Inside
-Information* (JF 67(3)) show that **over half** of insider trades are "routine" —
-predictable, compensation- or liquidity-driven — with **essentially zero** abnormal
-return, while the remaining "opportunistic" trades carry ~82bp/month. This pipeline
-does not yet separate them, so it averages the informative trades against the
-uninformative ones. Porting their classifier (an insider is *routine* if they traded in
-the same calendar month for three consecutive years) requires per-insider histories the
-250,000 TRY threshold makes sparse — a Türkiye-adapted definition has to be
-pre-registered before it is measured, not fitted afterwards.
+The gross abnormal return was always an upper bound, and this is what it was an upper
+bound over.
 
-**No tradability filter.** Insider clusters concentrate in illiquid names, and Borsa
-İstanbul's VBTS applies escalating measures to exactly those: short-selling ban →
-**gross settlement** → **single-price auction**, in 15-day steps. A stock under a
-single-price measure cannot be entered at the close the way the backtest assumes.
-Neither VBTS state nor a liquidity floor is currently applied to the universe, and no
-spread or market-impact cost is deducted. **Any positive result from this pipeline is
-therefore an upper bound, before frictions.**
+The spread is estimated **per trade** from the 30 sessions of that stock's own OHLC
+before entry (Abdi & Ranaldo 2017, RFS 30(12)) - not assumed as a flat fee, which would
+have flattered the answer, and not taken from a quote feed, which does not exist for the
+delisted names the exchange bulletin carries. Impact is Kyle/Almgren square-root on the
+same window; commission and BSMV are charged per side.
 
----
+    round-trip cost:  median 1.94%   p25 1.22%   p75 4.24%
+
+    horizon   N=1032   gross AR   net AR      t (net)
+    5d                  +0.57%    -2.77%     -13.11
+    20d                 +1.76%    -1.58%      -4.04
+    60d                 +2.09%    -1.24%      -1.98
+
+**The signal does not survive the cost of trading it.** Insider clusters fire in illiquid
+small caps, and the spread on those names is wider than the alpha. This is the project's
+result, not a caveat on it.
+
+One trap worth recording: the first version of the cost script *dropped* any trade whose
+Abdi-Ranaldo window came back degenerate (gamma >= 0, so a zero spread). That discarded
+96% of the sample - and the survivors' gross abnormal return came out **negative** where
+the full sample's was positive. The exclusion selects on exactly the price behaviour the
+signal is about. A quiet window is not a free trade: the estimate now widens the window
+and is floored at one tick, and nothing is dropped for it.
+
+### VBTS tradability - CLOSED, and it is NOT the constraint
+
+Borsa İstanbul escalates measures on volatile names: short-selling ban → **gross
+settlement** → single-price auction. A name under gross settlement cannot be round-tripped
+the way a backtest assumes. Insider clusters fire in exactly the names this happens to, so
+this looked like it might matter a great deal.
+
+The exchange bulletin carries the flags (`BRUT TAKAS`, `GECICI DURDURMA`), so they are now
+loaded. Measured: 143,012 gross-settlement ticker-days across 451 names - 11% of all price
+rows. But of 1,055 cluster entries, **only 11 (1.0%)** land on a restricted day, and none
+on a suspended one.
+
+So the gap is closed and it was never the binding constraint. The cost is.
+
+### Routine vs opportunistic - CLOSED, and the split does not exist here
+
+Pre-registered in `docs/stage0/OPPORTUNISTIC_CLASSIFIER.md` and frozen before it was run,
+because this was the signal's last plausible route to being tradeable and therefore
+exactly where a definition chosen after the fact would be most tempting.
+
+    cluster classes at 20d:  OPPORTUNISTIC=1043   ROUTINE=0   UNCLASSIFIED=12
+
+**Not one cluster classified as routine**, and the frozen document had said why in advance:
+SPK II-15.1's 250,000 TRY reporting threshold already censors the small, quiet, scheduled
+trades that CMP's routine class is built from. Turkish insiders have no routine *filings*
+because routine trades are never disclosed at all.
+
+So there is no noise to strip. The opportunistic subset IS the sample (1,043 of 1,055), its
+gross return is +1.80% against the pooled +1.76%, and it loses to the same spread.
+
+CMP's hypothesis is not refuted - it is **inapplicable**. The regulation that makes this
+dataset possible is the same regulation that removes the variation the test needs. That is
+a finding about Turkish disclosure, not about insiders.
+
+*Limitation, stated:* the 36-month lookback is thin on 3.5 years of data, so a fuller
+backfill would classify more insiders and might surface some routine ones. The direction is
+known - stripping routine trades RAISES gross alpha - but it would have to raise +1.76%
+past +1.94%, which is more than CMP's own effect size, and the disclosure threshold has
+already removed most of what would do the raising.
+
+## 6. Still open
+
+**Regime.** The window is 2015-2018. That spans the August 2018 currency crisis but not
+the 2021-2023 negative-real-rate retail boom or the 2023+ normalisation. The result is
+therefore **not regime-conditional**, and a signal that dies to the spread in one regime
+could in principle survive in another where those names traded tighter. The honest position
+is that this is untested, not that it is unaffected.
+
+Closing it needs the KAP backfill to reach 2026. That is a data-collection problem, not a
+methodological one, and it does not touch the mechanism: the spread eating the alpha is a
+microstructure fact about illiquid names, not a regime phenomenon.
+
+**Cluster scoring is close to single-factor.** `cluster_score` blends insider count (0.50),
+role seniority (0.30) and recency (0.20). In historical mode recency is pinned at 1.0, so
+20% of the weight is a constant, and seniority falls back to its 0.5 default wherever the
+scraped board roster does not cover an insider. When coverage is zero the score reduces to
+a monotone function of `insider_count` alone - `detect_clusters` now logs `role_map_empty`
+loudly in that case, where it used to happen silently. The score is not used to gate any
+result reported here, so this is a latent defect rather than an active one.
+
+**Kyle's lambda is uncalibrated** (1.0). At retail order size the impact term is small
+enough that the error changes no conclusion; at institutional size it would, and the number
+should not be trusted there.
 
 ## References
 

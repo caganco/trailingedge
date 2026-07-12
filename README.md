@@ -83,7 +83,7 @@ also carries the VBTS tradability flags - which, once measured, turned out to to
 > (20d: +1.76%, t = 5.12, N = 1,032, survivorship-clean) that does **not** survive a
 > per-trade cost estimate. The window is 2015-2018 - a single regime - so the result is
 > not yet regime-conditional, and that is stated rather than glossed. Remaining gaps are
-> in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md#5-known-open-issues), not left for a
+> in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md#6-still-open), not left for a
 > reader to discover.
 
 ## Türkçe özet
