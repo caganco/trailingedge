@@ -17,6 +17,21 @@ from trailing_edge.models.signal import PriceHistory
 _log = get_logger(__name__)
 
 
+# BIST tickers that were RENAMED, not delisted. KAP files them under the old code;
+# yfinance only serves the new one, so without this map their price history looks
+# missing - and a cluster with no prices is silently dropped from the base rate,
+# which reads exactly like survivorship bias. Verified individually against yfinance
+# (each new symbol returns a full 2015-2017 series; each old one returns nothing).
+_TICKER_ALIASES: dict[str, str] = {
+    "GYHOL": "GLYHO",  # Global Yatirim Holding
+    "AKFEN": "AKFGY",  # Akfen -> Akfen Gayrimenkul
+}
+
+
+def _yf_symbol(ticker: str) -> str:
+    return f"{_TICKER_ALIASES.get(ticker, ticker)}.IS"
+
+
 def _sync_yf_download(yf_tickers: list[str], start: str, end: str):
     import yfinance as yf
 
@@ -39,14 +54,62 @@ async def fetch_and_store_prices(
     Fetch OHLCV for each ticker from yfinance and upsert into price_history.
 
     tickers: BIST short codes (e.g. ["ASELS", "ISCTR"]) - ".IS" suffix added here.
-    Returns {ticker: rows_upserted}. Delisted / missing tickers are skipped with a warning.
-    """
-    import pandas as pd
+    Returns {ticker: rows_upserted}. Tickers yfinance genuinely has no data for are
+    reported as 0 rows.
 
+    Downloaded in SMALL BATCHES, and every batch that comes back short is retried one
+    ticker at a time.
+
+    One request for all 245 tickers looked efficient and quietly lost a third of them:
+    yfinance answers a batch containing an unknown symbol with an error naming several
+    ("Quote not found for symbol: GEREL, VRSGS.IS") and drops the innocent ones with it.
+    ACSEL, ANELT and ATLAS each have 750+ days of history and still ended up with no
+    price rows at all. Because a cluster with no prices is silently excluded from the
+    base rate, and the tickers most likely to be dropped are the obscure ones, the loss
+    read exactly like survivorship bias - it was a batching bug wearing its costume.
+    """
     if not tickers:
         return {}
 
-    yf_tickers = [f"{t}.IS" for t in tickers]
+    results: dict[str, int] = {}
+    batch_size = 20
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
+        got = await _fetch_batch(batch, start_date, end_date)
+
+        # Any ticker the batch did not deliver is retried alone, so one bad symbol
+        # cannot take its neighbours down with it.
+        missing = [t for t in batch if got.get(t, 0) == 0]
+        for ticker in missing:
+            solo = await _fetch_batch([ticker], start_date, end_date)
+            got[ticker] = solo.get(ticker, 0)
+            if got[ticker] == 0:
+                _log.warning("price_ticker_no_data", ticker=ticker)
+
+        results.update(got)
+
+    recovered = sum(1 for v in results.values() if v > 0)
+    _log.info(
+        "prices_fetch_done",
+        requested=len(tickers),
+        with_data=recovered,
+        without_data=len(tickers) - recovered,
+    )
+    return results
+
+
+async def _fetch_batch(
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+) -> dict[str, int]:
+    """Download and store one batch. Returns {ticker: rows_stored}, 0 where absent."""
+    import pandas as pd
+
+    yf_tickers = [_yf_symbol(t) for t in tickers]
+    # Map the downloaded symbol back to the ticker KAP files under.
+    by_symbol = {_yf_symbol(t): t for t in tickers}
 
     loop = asyncio.get_event_loop()
     try:
@@ -60,12 +123,11 @@ async def fetch_and_store_prices(
             ),
         )
     except Exception as exc:
-        _log.error("yfinance_download_failed", error=str(exc))
-        return {}
+        _log.warning("yfinance_batch_failed", tickers=len(tickers), error=str(exc))
+        return dict.fromkeys(tickers, 0)
 
     if df is None or df.empty:
-        _log.warning("yfinance_empty_response")
-        return {}
+        return dict.fromkeys(tickers, 0)
 
     results: dict[str, int] = {}
     is_multi = isinstance(df.columns, pd.MultiIndex)
@@ -81,7 +143,7 @@ async def fetch_and_store_prices(
 
     async with get_session() as session:
         for yf_ticker in yf_tickers:
-            ticker = yf_ticker.replace(".IS", "")
+            ticker = by_symbol[yf_ticker]
             try:
                 if is_multi:
                     level_vals = df.columns.get_level_values(ticker_level)
