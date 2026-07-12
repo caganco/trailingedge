@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import io
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from trailing_edge.core.logging import get_logger
 from trailing_edge.core.time import parse_kap_date
@@ -28,7 +28,26 @@ _TR_NUM_RE = re.compile(r"-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]+)?")
 # exactly 3 digits after a dot, and "14.06.2019" has 2.
 _DATE_RE = re.compile(r"\b(\d{2}[./]\d{2}[./]\d{4})\b")
 
-_PRICE_RANGE_RE = re.compile(r"([\d]+[,.][\d]+)\s*-\s*([\d]+[,.][\d]+)\s*TL")
+# Narrated prices come in three spellings across eras: "1,15" (comma decimal),
+# "1.234,56" (thousands + comma decimal), and "4.36" (dot decimal, pre-2016 filings).
+# The old pattern ([\d]+[,.][\d]+) matched only "1.234" out of "1.234,56" - which
+# parse_turkish_number then read as one thousand two hundred - and read "4.36" as 436.
+# Both produced false "price outside narrative range" rejections downstream.
+_PRICE_NUM = r"(?:\d{1,3}(?:\.\d{3})+,\d+|\d+,\d+|\d+\.\d+)"
+_PRICE_RANGE_RE = re.compile(rf"({_PRICE_NUM})\s*-\s*({_PRICE_NUM})\s*TL")
+
+
+def _parse_price_token(s: str) -> Decimal:
+    """Price-aware number parse: a dot followed by 1-2 digits is a DECIMAL point.
+
+    parse_turkish_number treats every dot as a thousands separator, which is right
+    for nominal amounts ("2.500.000") and wrong for old-era dot-decimal prices
+    ("4.36" must be 4.36 TL, not 436). Only exactly-3-digit dot groups are
+    thousands; anything else is a decimal written with a dot.
+    """
+    if re.fullmatch(r"\d+\.\d{1,2}", s.strip()):
+        return Decimal(s.strip())
+    return parse_turkish_number(s)
 
 # Known Turkish column header aliases per logical field (for header-driven column detection).
 _COLUMN_ALIASES: dict[str, list[str]] = {
@@ -267,6 +286,26 @@ _LEGACY_PRICE_MIN = Decimal("0.01")
 _LEGACY_PRICE_MAX = Decimal("100000")
 
 
+def _check_side(
+    qty: Decimal,
+    amt: Decimal,
+    price_range: tuple[Decimal, Decimal] | None,
+) -> str | None:
+    """Validate one direction of a totals binding. Returns a reason, or None if OK."""
+    if qty == 0 and amt == 0:
+        return None  # legitimately inactive side
+    if qty <= 0 or amt <= 0:
+        return "qty/amount inconsistent"
+    avg = amt / qty
+    if not (_LEGACY_PRICE_MIN <= avg <= _LEGACY_PRICE_MAX):
+        return f"implied price implausible ({avg:.4f})"
+    if price_range is not None:
+        lo, hi = price_range
+        if lo > 0 and not (lo * Decimal("0.9") <= avg <= hi * Decimal("1.1")):
+            return f"implied price {avg:.4f} outside narrative range {lo}-{hi}"
+    return None
+
+
 def _parse_legacy_blotter(
     text: str,
     ticker: str,
@@ -283,8 +322,15 @@ def _parse_legacy_blotter(
         _log.warning("dkb_row_rejected", reason="legacy: TOPLAM SATIŞ label not found")
         return []
 
-    # First four numeric cells after the totals labels: buy qty, sell qty,
-    # buy amount, sell amount (order verified on 2015 and 2018 fixtures).
+    # The four numeric cells after the totals labels. Their ORDER is not stable:
+    # pdfminer emits this table column-major in some files and row-major in others,
+    # giving either (buy qty, sell qty, buy amt, sell amt) or
+    # (buy qty, buy amt, sell qty, sell amt). Guessing the order is how columns got
+    # silently mis-read before, so it is not guessed: both bindings are validated
+    # against the same checks (each active side must have qty>0 AND amount>0, an
+    # implied average price inside the plausible band, and inside the narrated
+    # range when one exists) and the binding that uniquely survives wins. If both
+    # or neither survive, the filing is rejected loudly rather than half-trusted.
     numerics: list[Decimal] = []
     for ln in lines[sell_idx + 1:]:
         for tok in ln.split():
@@ -298,7 +344,7 @@ def _parse_legacy_blotter(
     if len(numerics) < 4:
         _log.warning("dkb_row_rejected", reason="legacy: totals block incomplete")
         return []
-    buy_qty, sell_qty, buy_amt, sell_amt = numerics[:4]
+    n1, n2, n3, n4 = numerics[:4]
 
     # Latest trade date in the document. The blotter's own rows and the narrative
     # carry the same dates, so a plain scan is order-independent.
@@ -313,46 +359,54 @@ def _parse_legacy_blotter(
         return []
     tx_date = max(dates)
 
-    # Narrative price range, if present, bounds the implied average price.
-    range_lo = range_hi = None
-    pm = _PRICE_RANGE_RE.search(text)
-    if pm:
+    # Narrated price ranges. The filing template narrates the buy leg first
+    # ("... fiyat aralığından N adet alış işlemi ve/veya ... satış işlemi"), so the
+    # first range bounds the buy side and the last bounds the sell side. With a
+    # single range and both directions active, only the buy side is range-checked -
+    # a sell narrated without its own range must not be rejected against the buy's.
+    ranges: list[tuple[Decimal, Decimal]] = []
+    for m in _PRICE_RANGE_RE.finditer(text):
         try:
-            range_lo = parse_turkish_number(pm.group(1))
-            range_hi = parse_turkish_number(pm.group(2))
+            ranges.append((_parse_price_token(m.group(1)), _parse_price_token(m.group(2))))
         except InvalidOperation:
             pass
+    buy_range = ranges[0] if ranges else None
+    sell_range = ranges[-1] if len(ranges) > 1 else None
+
+    bindings = {
+        "column-major": (n1, n2, n3, n4),  # buy qty, sell qty, buy amt, sell amt
+        "row-major": (n1, n3, n2, n4),     # buy qty, buy amt, sell qty, sell amt
+    }
+    survivors = {}
+    for name, (bq, sq, ba, sa) in bindings.items():
+        if _check_side(bq, ba, buy_range) is None and _check_side(sq, sa, sell_range) is None:
+            survivors[name] = (bq, sq, ba, sa)
+
+    if not survivors:
+        _log.warning(
+            "dkb_row_rejected",
+            reason="legacy: no totals binding satisfies the checks",
+            cells=[float(v) for v in (n1, n2, n3, n4)],
+        )
+        return []
+    if len(survivors) > 1:
+        # Both orders pass only when the bindings agree in substance (e.g. one side
+        # all zeros makes them identical); otherwise the filing is truly ambiguous.
+        vals = list(survivors.values())
+        if vals[0] != vals[1]:
+            _log.warning(
+                "dkb_row_rejected",
+                reason="legacy: totals binding ambiguous",
+                cells=[float(v) for v in (n1, n2, n3, n4)],
+            )
+            return []
+    binding_name, (buy_qty, sell_qty, buy_amt, sell_amt) = next(iter(survivors.items()))
 
     txs: list[KapInsiderTxDTO] = []
     for tx_type, qty, amt in (("BUY", buy_qty, buy_amt), ("SELL", sell_qty, sell_amt)):
-        if qty == 0 and amt == 0:
+        if qty == 0:
             continue
-        if qty <= 0 or amt <= 0:
-            _log.warning(
-                "dkb_row_rejected",
-                reason=f"legacy: {tx_type} qty/amount inconsistent",
-                qty=float(qty),
-                amount=float(amt),
-            )
-            continue
-        avg_price = (amt / qty).quantize(Decimal("0.0001"))
-        if not (_LEGACY_PRICE_MIN <= avg_price <= _LEGACY_PRICE_MAX):
-            _log.warning(
-                "dkb_row_rejected",
-                reason="legacy: implied price implausible",
-                avg_price=float(avg_price),
-            )
-            continue
-        if range_lo is not None and range_hi is not None and range_lo > 0:
-            if not (range_lo * Decimal("0.9") <= avg_price <= range_hi * Decimal("1.1")):
-                _log.warning(
-                    "dkb_row_rejected",
-                    reason="legacy: implied price outside narrative range",
-                    avg_price=float(avg_price),
-                    range_lo=float(range_lo),
-                    range_hi=float(range_hi),
-                )
-                continue
+        avg_price = (amt / qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         txs.append(
             KapInsiderTxDTO(
                 insider_name=insider_name,
@@ -372,6 +426,7 @@ def _parse_legacy_blotter(
             tx_type=tx_type,
             qty=float(qty),
             avg_price=float(avg_price),
+            binding=binding_name,
         )
     return txs
 
@@ -409,7 +464,7 @@ def parse_dkb_transactions(
     pm = _PRICE_RANGE_RE.search(text)
     if pm:
         try:
-            price_try = parse_turkish_number(pm.group(1))
+            price_try = _parse_price_token(pm.group(1))
         except InvalidOperation:
             pass
 
