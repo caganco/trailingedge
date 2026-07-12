@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     ForeignKey,
     Index,
@@ -32,6 +33,17 @@ class PriceHistory(Base):
     low_try: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     close_try: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     volume: Mapped[int | None] = mapped_column(BigInteger)
+
+    # VBTS tradability, straight from the exchange bulletin. A name under gross
+    # settlement cannot be round-tripped the way a backtest assumes, and a suspended
+    # one cannot be traded at all - the signal fires precisely in the names this
+    # happens to.
+    gross_settlement: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    suspended: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     fetched_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

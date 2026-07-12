@@ -83,6 +83,8 @@ ARCHIVE = Path(
 C_DATE = 0
 C_CODE = 1
 C_TYPE = 7
+C_GROSS_SETTLE = 13  # BRUT TAKAS  - VBTS measure: cash-and-carry only
+C_SUSPENDED = 15     # GECICI DURDURMA - trading halted
 C_PREV_CLOSE = 16  # ONCEKI KAPANIS FIYATI - restated by the exchange across a CA
 C_OPEN = 17
 C_LOW = 20
@@ -218,6 +220,8 @@ def _rows_from_legacy_csv(text: str) -> list[dict]:
                 "low_try": low,
                 "close_try": close,
                 "volume": volume,
+                "gross_settlement": False,  # not published in the pre-2015-12 bulletin
+                "suspended": False,
                 "_prev_close": prev,
                 "_session": session_no,
             }
@@ -276,6 +280,8 @@ def _rows_from_csv(text: str) -> list[dict]:
                 "low_try": _dec(parts[C_LOW]),
                 "close_try": close,
                 "volume": volume,
+                "gross_settlement": parts[C_GROSS_SETTLE].strip() == "1",
+                "suspended": parts[C_SUSPENDED].strip() == "1",
                 "_prev_close": _dec(parts[C_PREV_CLOSE]),
             }
         )
@@ -370,8 +376,8 @@ async def _store(rows: list[dict]) -> int:
     if not rows:
         return 0
     async with get_session() as session:
-        for i in range(0, len(rows), 4000):
-            chunk = rows[i : i + 4000]
+        for i in range(0, len(rows), 3000):
+            chunk = rows[i : i + 3000]
             stmt = pg_insert(PriceHistory.__table__).values(chunk)
             await session.execute(
                 stmt.on_conflict_do_update(
@@ -382,6 +388,8 @@ async def _store(rows: list[dict]) -> int:
                         "high_try": stmt.excluded.high_try,
                         "low_try": stmt.excluded.low_try,
                         "volume": stmt.excluded.volume,
+                        "gross_settlement": stmt.excluded.gross_settlement,
+                        "suspended": stmt.excluded.suspended,
                     },
                 )
             )
