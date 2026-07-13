@@ -11,7 +11,6 @@ import time
 import httpx
 import pytest
 
-from trailing_edge.core import http as http_mod
 from trailing_edge.core.http import RateLimitedClient, _load_proxies
 
 
