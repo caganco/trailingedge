@@ -45,6 +45,19 @@ _IP_COOLDOWN_S = 120.0
 _PACE_EVERY = int(os.environ.get("KAP_PACE_EVERY", "120"))
 _PACE_SLEEP_S = float(os.environ.get("KAP_PACE_SLEEP_S", "120"))
 
+# Requests made on each IP since its last pause, keyed by proxy URL (None = direct). This is
+# MODULE-level on purpose: the backfill builds a fresh RateLimitedClient per month, but the
+# WAF budget is per-IP and global across months. A per-client counter would reset every month
+# and never fire on the sparse recent months, which is exactly where it was needed - a run of
+# short months would spend the shared budget between them and block. Keyed by IP so it still
+# composes with a proxy pool.
+_PACE_STATE: dict[str | None, int] = {}
+
+
+def _reset_pace_state() -> None:
+    """Clear the module-level pace counters. For tests; not used in normal operation."""
+    _PACE_STATE.clear()
+
 
 def _load_proxies() -> list[str | None]:
     """Proxy URLs for the rotation pool, or ``[None]`` for a direct connection.
@@ -110,7 +123,6 @@ class RateLimitedClient:
         self._clients: list[httpx.AsyncClient] = []
         self._limiters: list[AsyncLimiter] = []
         self._cooling_until: list[float] = []
-        self._since_pause: list[int] = []  # requests on each IP since its last proactive pause
         self._idx = 0
 
     async def __aenter__(self) -> "RateLimitedClient":
@@ -125,7 +137,6 @@ class RateLimitedClient:
             )
             self._limiters.append(AsyncLimiter(self._rps, 1.0))
             self._cooling_until.append(0.0)
-            self._since_pause.append(0)
         if len(self._proxies) > 1:
             _log.info("proxy_pool_active", pool_size=len(self._proxies))
         return self
@@ -179,7 +190,7 @@ class RateLimitedClient:
             except httpx.RemoteProtocolError as exc:
                 last_exc = exc
                 self._cooling_until[i] = time.monotonic() + _IP_COOLDOWN_S
-                self._since_pause[i] = 0  # the cooldown refills the budget
+                _PACE_STATE[self._proxies[i]] = 0  # the cooldown refills the budget
                 self._idx = (i + 1) % len(self._clients)
                 _log.info("proxy_ip_cooling", proxy_index=i, cooldown_s=_IP_COOLDOWN_S)
 
@@ -198,12 +209,14 @@ class RateLimitedClient:
         # Pace under the budget before spending it. This IP has made _PACE_EVERY requests
         # since its last pause, so it is approaching the block threshold - wait out the
         # refill window now, on our terms, instead of hitting the wall and paying a backoff
-        # plus a PARTIAL month plus a recovery sweep.
-        if _PACE_EVERY > 0 and self._since_pause[i] >= _PACE_EVERY:
-            self._since_pause[i] = 0
+        # plus a PARTIAL month plus a recovery sweep. The counter is module-level and keyed
+        # by IP, so it survives the fresh client the backfill builds for each month.
+        ip = self._proxies[i]
+        if _PACE_EVERY > 0 and _PACE_STATE.get(ip, 0) >= _PACE_EVERY:
+            _PACE_STATE[ip] = 0
             _log.info("pace_pause", proxy_index=i, after_requests=_PACE_EVERY, sleep_s=_PACE_SLEEP_S)
             await asyncio.sleep(_PACE_SLEEP_S)
-        self._since_pause[i] += 1
+        _PACE_STATE[ip] = _PACE_STATE.get(ip, 0) + 1
 
         @retry(
             retry=retry_if_exception(_is_retryable),

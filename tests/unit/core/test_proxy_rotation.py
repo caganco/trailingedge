@@ -17,11 +17,15 @@ from trailing_edge.core.http import RateLimitedClient, _load_proxies
 
 @pytest.fixture(autouse=True)
 def _no_ambient_proxies(monkeypatch, tmp_path):
-    """Keep a developer's real proxies.txt or KAP_PROXIES out of the unit tests, and hold
-    the proactive pacer off so these rotation tests do not sleep."""
+    """Keep a developer's real proxies.txt or KAP_PROXIES out of the unit tests, hold the
+    proactive pacer off so these rotation tests do not sleep, and clear the module-level pace
+    counters so state cannot leak between tests."""
     monkeypatch.delenv("KAP_PROXIES", raising=False)
     monkeypatch.setattr(http_mod, "_PACE_EVERY", 0)
+    http_mod._reset_pace_state()
     monkeypatch.chdir(tmp_path)
+    yield
+    http_mod._reset_pace_state()
 
 
 def test_no_proxy_configured_means_one_direct_connection():
@@ -90,6 +94,43 @@ async def test_the_pacer_pauses_before_the_budget_is_spent(monkeypatch):
             await client.get("https://kap.org.tr/x")
 
     assert slept.count(0.0) == 1, "exactly one proactive pause after PACE_EVERY requests"
+
+
+@pytest.mark.asyncio
+async def test_pace_state_survives_a_fresh_client_across_chunks(monkeypatch):
+    """The bug this pins: the backfill builds a new RateLimitedClient per month, but the WAF
+    budget is global per-IP across months. When the counter lived on the client it reset
+    every month and never fired on the sparse recent months - a run of short months spent
+    the shared budget between them and blocked. The counter is module-level and keyed by IP,
+    so two requests through one client and two through the next must together trip the pace
+    at the 4th, not restart the count."""
+    monkeypatch.setattr(http_mod, "_PACE_EVERY", 3)
+    monkeypatch.setattr(http_mod, "_PACE_SLEEP_S", 0.0)
+
+    slept: list[float] = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(http_mod.asyncio, "sleep", fake_sleep)
+
+    async def ok(*a, **k):
+        return httpx.Response(200, request=httpx.Request("GET", "https://k/x"))
+
+    # first "month": a fresh client makes 2 requests
+    async with RateLimitedClient() as c1:
+        monkeypatch.setattr(c1._clients[0], "request", ok)
+        await c1.get("https://kap.org.tr/x")
+        await c1.get("https://kap.org.tr/x")
+
+    # second "month": a brand-new client, same direct IP, makes 2 more
+    async with RateLimitedClient() as c2:
+        monkeypatch.setattr(c2._clients[0], "request", ok)
+        await c2.get("https://kap.org.tr/x")
+        await c2.get("https://kap.org.tr/x")
+
+    # 4 requests on the one IP crossed the pace-of-3 once, despite the client being rebuilt
+    assert slept.count(0.0) == 1, "pace must accumulate across client instances, not reset"
 
 
 @pytest.mark.asyncio
