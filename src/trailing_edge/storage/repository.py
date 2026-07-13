@@ -2,8 +2,9 @@
 from dataclasses import dataclass
 from datetime import date as date_type
 from datetime import datetime, timezone
+from typing import Any, cast
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import CursorResult, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,9 +57,21 @@ class KapRepository:
         )
         result = await self._s.execute(stmt)
         row = result.fetchone()
-        created = row.ingested_at == row.updated_at if row else False
+        if row is None:
+            # INSERT ... ON CONFLICT DO UPDATE ... RETURNING always yields a row, so this
+            # cannot happen while the statement above is what it looks like. It is checked
+            # rather than assumed because the alternative - the old code guarded `row` for
+            # None on the next line and then dereferenced it anyway - is to hand the caller
+            # a None model that reads as a successfully stored disclosure.
+            raise RuntimeError(
+                f"upsert of KAP disclosure {dto.kap_disclosure_id} returned no row"
+            )
+
+        created = row.ingested_at == row.updated_at
         model = await self._s.get(KapDisclosure, row.id)
-        return model, created  # type: ignore[return-value]
+        if model is None:
+            raise RuntimeError(f"KAP disclosure {row.id} vanished between upsert and read")
+        return model, created
 
     async def upsert_transactions(
         self, disclosure_id: int, txs: list[KapInsiderTxDTO]
@@ -93,7 +106,9 @@ class KapRepository:
                 .on_conflict_do_nothing(constraint="uq_insider_tx")
             )
             result = await self._s.execute(stmt)
-            if result.rowcount == 1:
+            # rowcount lives on CursorResult, which is what execute() returns for a DML
+            # statement; Result is the wider declared type and does not carry it.
+            if cast("CursorResult[Any]", result).rowcount == 1:
                 inserted += 1
             else:
                 skipped += 1
@@ -182,7 +197,7 @@ class GraphRepository:
         for member in members:
             name_norm = normalize_name(member.full_name)
             await self._s.execute(
-                insert(Person.__table__)
+                insert(Person)
                 .values(full_name=member.full_name, name_normalized=name_norm)
                 .on_conflict_do_nothing(constraint="uq_person_name")
             )
@@ -207,7 +222,7 @@ class GraphRepository:
             )
 
             await self._s.execute(
-                insert(PersonCompanyRole.__table__).values(
+                insert(PersonCompanyRole).values(
                     person_id=person_id,
                     company_id=company_id,
                     role=member.role,

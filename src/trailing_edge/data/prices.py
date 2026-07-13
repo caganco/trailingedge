@@ -191,7 +191,7 @@ async def _fetch_batch(
                     results[ticker] = 0
                     continue
 
-                insert_stmt = pg_insert(PriceHistory.__table__).values(values_list)
+                insert_stmt = pg_insert(PriceHistory).values(values_list)
                 # The exchange bulletin is authoritative and yfinance must not overwrite
                 # it. They are not interchangeable sources of the same number:
                 #
@@ -216,7 +216,7 @@ async def _fetch_batch(
                         "low_try": insert_stmt.excluded.low_try,
                         "volume": insert_stmt.excluded.volume,
                     },
-                    where=PriceHistory.__table__.c.raw_close_try.is_(None),
+                    where=PriceHistory.raw_close_try.is_(None),
                 )
                 await session.execute(upsert_stmt)
                 results[ticker] = len(values_list)

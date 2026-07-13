@@ -15,6 +15,7 @@ The site's anti-bot control is respected, not circumvented.
 from __future__ import annotations
 
 from types import TracebackType
+from typing import Any
 
 from trailing_edge.core.config import get_config
 from trailing_edge.core.logging import get_logger
@@ -37,10 +38,10 @@ class TsgClient:
         self._base_url: str = cfg.get("base_url", "https://www.ticaretsicil.gov.tr")
         self._ilan_path: str = cfg.get("ilan_path", "/view/hizlierisim/ilangoruntuleme.php")
         self._login_timeout = int(cfg.get("login_timeout_s", 180)) * 1000
-        self._pw = None
-        self._browser = None
-        self._ctx = None
-        self._page = None
+        self._pw: Any = None
+        self._browser: Any = None
+        self._ctx: Any = None
+        self._page: Any = None
 
     async def __aenter__(self) -> "TsgClient":
         from playwright.async_api import async_playwright

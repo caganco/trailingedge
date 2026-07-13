@@ -203,7 +203,7 @@ async def detect_clusters(as_of_date: date | None = None) -> list[InsiderCluster
                     total_value = sum(non_null)
 
                 insert_stmt = (
-                    pg_insert(InsiderCluster.__table__)
+                    pg_insert(InsiderCluster)
                     .values(
                         ticker=ticker,
                         window_start=window_start,

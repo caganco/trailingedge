@@ -140,7 +140,7 @@ async def calculate_outcomes(
                 }
 
                 stmt = (
-                    pg_insert(SignalOutcome.__table__)
+                    pg_insert(SignalOutcome)
                     .values(cluster_id=cluster.id, horizon_days=horizon, **values)
                     .on_conflict_do_update(
                         constraint="uq_outcome_cluster_horizon", set_=values

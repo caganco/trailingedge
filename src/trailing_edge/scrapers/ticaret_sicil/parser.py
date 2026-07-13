@@ -86,7 +86,9 @@ def parse_search_results(html: str) -> list[IlanRow]:
         pdf_link = tr.find("a", href=_PDF_GUID_RE)
         if not pdf_link:
             continue
-        guid_match = _PDF_GUID_RE.search(pdf_link["href"])
+        # BeautifulSoup types an attribute as str | AttributeValueList (a multi-valued
+        # attribute like class=""); href is single-valued, but the type says otherwise.
+        guid_match = _PDF_GUID_RE.search(str(pdf_link["href"]))
         if not guid_match:
             continue
 
