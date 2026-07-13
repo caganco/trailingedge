@@ -272,7 +272,22 @@ async def main_async(
             _log.info("chunk_dry_run", from_date=from_date, to_date=to_date)
             continue
 
-        await _run_chunk(from_date, to_date)
+        # A month that exhausts its WAF backoffs must NOT kill the whole run. Its
+        # scraper_runs record is already written (PARTIAL, or FAILED if the warmup never
+        # got through), so a later sweep collects it - that is the entire point of the
+        # ledger. Before the ladder was shortened this rarely fired, because a 20-minute
+        # backoff usually outlasted the block; now that the tail is gone a genuinely
+        # blocked month exhausts faster, and letting its RuntimeError propagate abandoned
+        # every remaining month behind it. Log it and move on.
+        try:
+            await _run_chunk(from_date, to_date)
+        except RuntimeError as exc:
+            _log.warning(
+                "chunk_abandoned",
+                from_date=from_date,
+                to_date=to_date,
+                error=str(exc),
+            )
         await asyncio.sleep(_CHUNK_GAP_S)
 
     if dry_run:
