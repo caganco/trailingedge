@@ -30,11 +30,15 @@ def _score(roles, count=2, gap=7):
 
 
 def test_reproduces_the_degenerate_score_from_the_committed_sample():
-    """reports/sample/daily_signal.example.json recorded cluster_score=42.8333.
+    """The committed sample still scores with seniority pinned at its 0.5 default,
+    because person_company_roles is effectively empty in production - the report logs
+    `role_map_empty` every run. Under that default the score collapses to:
 
-    That value is exactly what you get when seniority is the 0.5 default:
         (0.25 * 0.5) + (0.5 * 0.3) + (0.7667 * 0.2) = 0.428333
-    Reproducing it from all-None roles is the proof the map was dead in production.
+
+    Reproducing it from all-None roles is the proof the map is dead. Until
+    `graph scrape-management` populates the roster, cluster_score is insider_count wearing
+    a decimal point.
     """
     assert _score([None, None]) == Decimal("42.8333")
 

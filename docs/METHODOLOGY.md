@@ -168,16 +168,33 @@ have flattered the answer, and not taken from a quote feed, which does not exist
 delisted names the exchange bulletin carries. Impact is Kyle/Almgren square-root on the
 same window; commission and BSMV are charged per side.
 
-    round-trip cost:  median 1.94%   p25 1.22%   p75 4.24%
+    round-trip cost:  median 1.93%   p25 1.19%   p75 4.34%
 
-    horizon   N=1032   gross AR   net AR      t (net)
-    5d                  +0.57%    -2.77%     -13.11
-    20d                 +1.76%    -1.58%      -4.04
-    60d                 +2.09%    -1.24%      -1.98
+    horizon   N=1070   gross AR   net AR      t (net)
+    5d                  +0.66%    -2.71%     -12.91
+    20d                 +2.02%    -1.35%      -3.31
+    60d                 +2.18%    -1.20%      -1.86   (not significant)
 
 **The signal does not survive the cost of trading it.** Insider clusters fire in illiquid
 small caps, and the spread on those names is wider than the alpha. This is the project's
-result, not a caveat on it.
+result, not a caveat on it. At 60 days the net loss stops being statistically
+distinguishable from zero, which is not a reprieve: the point estimate is still negative,
+and a signal that *may* break even over three months is not an edge either.
+
+A second trap, found later and more serious than the first, because it sat under the
+number that decides the answer. `price_history.close_try` is a **chained total-return
+index**, not a price - correct for returns, and every return here is computed from it. But
+the tick floor is 0.01 TRY on the exchange's grid, and ADV is price x volume, and both
+were being handed the index. BIST companies issue bonus shares constantly, so the index
+and the print pull apart: measured on 2018-12 bulletin data, a median 0.98x but a range of
+0.60x to 118x, with 32% of ticker-days off by more than 10%. Because the factor falls on
+both sides of 1, the error was not conservative - it mispriced trades in both directions,
+worst in the serial bonus-issuers, which are small caps, which is exactly where the tick
+floor binds. Migration 0008 keeps the raw print alongside the index; the spread estimator
+is scale-free and correctly stays on the index, while the floor and ADV moved to the
+price. Correcting it *raised* N from 1,032 to 1,070 (the earliest 2015 clusters had been
+silently dropped for want of a 22-session lookback, and those clusters averaged +8.45% at
+20 days against +1.93% for the rest) and left the verdict standing.
 
 One trap worth recording: the first version of the cost script *dropped* any trade whose
 Abdi-Ranaldo window came back degenerate (gamma >= 0, so a zero spread). That discarded
@@ -195,8 +212,7 @@ this looked like it might matter a great deal.
 
 The exchange bulletin carries the flags (`BRUT TAKAS`, `GECICI DURDURMA`), so they are now
 loaded. Measured: 143,012 gross-settlement ticker-days across 451 names - 11% of all price
-rows. But of 1,055 cluster entries, **only 11 (1.0%)** land on a restricted day, and none
-on a suspended one.
+rows. But of 1,079 cluster entries, **only 16 (1.5%)** land on a restricted day.
 
 So the gap is closed and it was never the binding constraint. The cost is.
 
@@ -206,15 +222,20 @@ Pre-registered in `docs/stage0/OPPORTUNISTIC_CLASSIFIER.md` and frozen before it
 because this was the signal's last plausible route to being tradeable and therefore
 exactly where a definition chosen after the fact would be most tempting.
 
-    cluster classes at 20d:  OPPORTUNISTIC=1043   ROUTINE=0   UNCLASSIFIED=12
+    cluster classes at 20d:  OPPORTUNISTIC=1066   ROUTINE=0   UNCLASSIFIED=13
+
+    OPPORTUNISTIC  20d  N=1059   gross +2.08%   cost 3.38%   net -1.31%   t = -3.18
+                                                               LOSES MONEY (net)
 
 **Not one cluster classified as routine**, and the frozen document had said why in advance:
 SPK II-15.1's 250,000 TRY reporting threshold already censors the small, quiet, scheduled
 trades that CMP's routine class is built from. Turkish insiders have no routine *filings*
 because routine trades are never disclosed at all.
 
-So there is no noise to strip. The opportunistic subset IS the sample (1,043 of 1,055), its
-gross return is +1.80% against the pooled +1.76%, and it loses to the same spread.
+So there is no noise to strip. The opportunistic subset IS the sample (1,066 of 1,079), its
+gross return is +2.08% against the pooled +2.07% - indistinguishable - and it loses to the
+same spread. The pre-registered prior said the subset "will be stronger gross but will
+still not clear the spread"; it was not even stronger.
 
 CMP's hypothesis is not refuted - it is **inapplicable**. The regulation that makes this
 dataset possible is the same regulation that removes the variation the test needs. That is
@@ -222,9 +243,9 @@ a finding about Turkish disclosure, not about insiders.
 
 *Limitation, stated:* the 36-month lookback is thin on 3.5 years of data, so a fuller
 backfill would classify more insiders and might surface some routine ones. The direction is
-known - stripping routine trades RAISES gross alpha - but it would have to raise +1.76%
-past +1.94%, which is more than CMP's own effect size, and the disclosure threshold has
-already removed most of what would do the raising.
+known - stripping routine trades RAISES gross alpha - but it would have to raise +2.08%
+past the 3.38% mean cost, which is far more than CMP's own effect size, and the disclosure
+threshold has already removed most of what would do the raising.
 
 ### Split-sample stability - the conclusion holds in both halves
 

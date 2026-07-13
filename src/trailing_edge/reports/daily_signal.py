@@ -96,6 +96,29 @@ def _print_table(as_of_date: date, clusters: list[InsiderCluster], base_rates: d
         )
 
     click.echo(sep_row)
+    _print_cost_warning()
+
+
+# The base rate is computed GROSS. compute_base_rate knows nothing about the bid-ask
+# spread, so on this sample it returns EDGE_DETECTED - a real, significant, and entirely
+# uncapturable +2.07% at 20 days. Printing a hit rate and a verdict with no mention of the
+# cost that eats them would have this tool contradict its own project's finding, and would
+# be the single most misleading thing it could do: a reader sees "EDGE_DETECTED, 54.7%"
+# and trades it. The measured net result goes on the same screen as the gross one.
+_NET_OF_COST_20D = "-1.35%"
+_NET_T_20D = "-3.31"
+
+
+def _print_cost_warning() -> None:
+    click.echo("")
+    click.echo("  HIT RATE AND BASE RATE ABOVE ARE GROSS - BEFORE TRANSACTION COSTS.")
+    click.echo(
+        f"  Net of the measured round-trip cost, this signal has historically LOST money:"
+        f" 20d net {_NET_OF_COST_20D} (t = {_NET_T_20D}, N = 1,070)."
+    )
+    click.echo("  Insider clusters fire in illiquid small caps whose spread is wider than")
+    click.echo("  the alpha. See docs/METHODOLOGY.md and scripts/net_of_cost.py.")
+    click.echo("")
 
 
 def _to_json_safe(obj):
@@ -185,6 +208,23 @@ async def generate_daily_report(as_of_date: date | None = None) -> DailyReport:
                 "mean_benchmark_return_pct": float(base_rates[h].mean_benchmark_return_pct),
             }
             for h in horizons
+        },
+        # Every base_rate above is GROSS. A machine consumer reading `verdict:
+        # EDGE_DETECTED` and acting on it would be acting on a number this project has
+        # measured as uncapturable, so the net result travels in the same document rather
+        # than in a README the consumer never reads.
+        "cost_adjusted": {
+            "basis": "Abdi-Ranaldo (2017) spread + Kyle/Almgren impact + commission/BSMV,"
+            " estimated per trade from the stock's own OHLC",
+            "median_round_trip_cost_pct": 1.93,
+            "mean_round_trip_cost_pct": 3.37,
+            "net_abnormal_return_pct": {"5": -2.71, "20": -1.35, "60": -1.20},
+            "net_t_stat": {"5": -12.91, "20": -3.31, "60": -1.86},
+            "n": 1070,
+            "verdict": "LOSES_MONEY_NET_OF_COST",
+            "note": "The gross verdict above is real and significant. It is not tradeable:"
+            " insider clusters fire in illiquid small caps whose bid-ask spread is wider"
+            " than the alpha. See docs/METHODOLOGY.md.",
         },
         "generated_at": str(today),
     }

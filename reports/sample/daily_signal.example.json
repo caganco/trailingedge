@@ -1,75 +1,115 @@
 {
-  "as_of_date": "2026-05-28",
+  "as_of_date": "2018-12-14",
   "clusters": [
     {
       "ticker": "XXXXX",
-      "cluster_score": 42.8333,
+      "cluster_score": 46.1667,
       "insider_count": 2,
-      "window_start": "2026-05-21",
-      "window_end": "2026-05-21",
-      "days_since_last_buy": 7,
+      "window_start": "2018-12-11",
+      "window_end": "2018-12-12",
+      "days_since_last_buy": 2,
       "unique_insiders": [
         "INSIDER A",
         "INSIDER B"
       ],
-      "total_buy_value_try": 711360.0
+      "total_buy_value_try": 7563364.61
+    },
+    {
+      "ticker": "XXXXX",
+      "cluster_score": 45.5,
+      "insider_count": 2,
+      "window_start": "2018-12-11",
+      "window_end": "2018-12-11",
+      "days_since_last_buy": 3,
+      "unique_insiders": [
+        "INSIDER A",
+        "INSIDER B"
+      ],
+      "total_buy_value_try": 2490289.61
     }
   ],
   "base_rates": {
     "5": {
       "horizon_days": 5,
-      "benchmark_ticker": null,
-      "total_signals": 30,
-      "signals_with_outcome": 0,
-      "verdict": "INSUFFICIENT_POWER",
+      "benchmark_ticker": "XU100",
+      "total_signals": 1093,
+      "signals_with_outcome": 1079,
+      "verdict": "EDGE_DETECTED",
       "required_n_for_power": 784,
-      "hit_rate_pct": 0.0,
-      "hit_rate_ci_95": [0.0, 0.0],
-      "mean_abnormal_return_pct": 0.0,
-      "median_abnormal_return_pct": 0.0,
-      "t_stat": 0.0,
-      "p_value": 1.0,
-      "best_abnormal_return_pct": 0.0,
-      "worst_abnormal_return_pct": 0.0,
-      "mean_raw_return_pct": 0.0,
-      "mean_benchmark_return_pct": 0.0
+      "hit_rate_pct": 52.09,
+      "hit_rate_ci_95": [
+        49.1,
+        55.05
+      ],
+      "mean_abnormal_return_pct": 0.68,
+      "median_abnormal_return_pct": 0.14,
+      "t_stat": 3.75,
+      "p_value": 0.0002,
+      "best_abnormal_return_pct": 35.78,
+      "worst_abnormal_return_pct": -23.05,
+      "mean_raw_return_pct": 0.65,
+      "mean_benchmark_return_pct": -0.03
     },
     "20": {
       "horizon_days": 20,
-      "benchmark_ticker": null,
-      "total_signals": 30,
-      "signals_with_outcome": 0,
-      "verdict": "INSUFFICIENT_POWER",
+      "benchmark_ticker": "XU100",
+      "total_signals": 1093,
+      "signals_with_outcome": 1079,
+      "verdict": "EDGE_DETECTED",
       "required_n_for_power": 784,
-      "hit_rate_pct": 0.0,
-      "hit_rate_ci_95": [0.0, 0.0],
-      "mean_abnormal_return_pct": 0.0,
-      "median_abnormal_return_pct": 0.0,
-      "t_stat": 0.0,
-      "p_value": 1.0,
-      "best_abnormal_return_pct": 0.0,
-      "worst_abnormal_return_pct": 0.0,
-      "mean_raw_return_pct": 0.0,
-      "mean_benchmark_return_pct": 0.0
+      "hit_rate_pct": 54.68,
+      "hit_rate_ci_95": [
+        51.7,
+        57.63
+      ],
+      "mean_abnormal_return_pct": 2.07,
+      "median_abnormal_return_pct": 0.78,
+      "t_stat": 5.36,
+      "p_value": 0.0,
+      "best_abnormal_return_pct": 96.68,
+      "worst_abnormal_return_pct": -57.35,
+      "mean_raw_return_pct": 2.33,
+      "mean_benchmark_return_pct": 0.26
     },
     "60": {
       "horizon_days": 60,
-      "benchmark_ticker": null,
-      "total_signals": 30,
-      "signals_with_outcome": 0,
-      "verdict": "INSUFFICIENT_POWER",
+      "benchmark_ticker": "XU100",
+      "total_signals": 1094,
+      "signals_with_outcome": 1080,
+      "verdict": "EDGE_DETECTED",
       "required_n_for_power": 784,
-      "hit_rate_pct": 0.0,
-      "hit_rate_ci_95": [0.0, 0.0],
-      "mean_abnormal_return_pct": 0.0,
-      "median_abnormal_return_pct": 0.0,
-      "t_stat": 0.0,
-      "p_value": 1.0,
-      "best_abnormal_return_pct": 0.0,
-      "worst_abnormal_return_pct": 0.0,
-      "mean_raw_return_pct": 0.0,
-      "mean_benchmark_return_pct": 0.0
+      "hit_rate_pct": 52.13,
+      "hit_rate_ci_95": [
+        49.15,
+        55.1
+      ],
+      "mean_abnormal_return_pct": 2.31,
+      "median_abnormal_return_pct": 1.02,
+      "t_stat": 3.6,
+      "p_value": 0.0003,
+      "best_abnormal_return_pct": 101.25,
+      "worst_abnormal_return_pct": -65.82,
+      "mean_raw_return_pct": 4.25,
+      "mean_benchmark_return_pct": 1.94
     }
   },
-  "generated_at": "2026-05-28"
+  "cost_adjusted": {
+    "basis": "Abdi-Ranaldo (2017) spread + Kyle/Almgren impact + commission/BSMV, estimated per trade from the stock's own OHLC",
+    "median_round_trip_cost_pct": 1.93,
+    "mean_round_trip_cost_pct": 3.37,
+    "net_abnormal_return_pct": {
+      "5": -2.71,
+      "20": -1.35,
+      "60": -1.2
+    },
+    "net_t_stat": {
+      "5": -12.91,
+      "20": -3.31,
+      "60": -1.86
+    },
+    "n": 1070,
+    "verdict": "LOSES_MONEY_NET_OF_COST",
+    "note": "The gross verdict above is real and significant. It is not tradeable: insider clusters fire in illiquid small caps whose bid-ask spread is wider than the alpha. See docs/METHODOLOGY.md."
+  },
+  "generated_at": "2018-12-14"
 }

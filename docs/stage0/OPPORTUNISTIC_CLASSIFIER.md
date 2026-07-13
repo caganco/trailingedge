@@ -85,3 +85,33 @@ in the US sample.
 
 Recording this matters: if the result comes out positive, it comes out *against* the
 prior, and that is worth more than a confirmation.
+
+---
+
+## Addendum, 2026-07-13 (after the fact - the text above is unchanged)
+
+Nothing above this line has been edited. A pre-registration that gets rewritten once the
+answer is known is worth less than no pre-registration at all, so the baseline figures in
+it (+1.76% gross against a 1.94% median cost) stay exactly as they were written, even
+though both numbers have since moved.
+
+They moved because a fault was found in the cost model *after* this document was frozen:
+`price_history.close_try` is a chained total-return index, and the tick floor and ADV were
+reading it as if it were a traded price. On the corrected basis the pooled figures are
++2.07% gross (N = 1,079) against a 1.93% median / 3.37% mean round-trip cost. See
+`docs/METHODOLOGY.md` §5.
+
+**The frozen decision rule was applied to the corrected data, not re-chosen for it:**
+
+    OPPORTUNISTIC  20d (primary)  N = 1,059   gross +2.08%   net -1.31%   t = -3.18
+    ROUTINE                       N = 0
+
+- N = 1,059 clears the pre-registered MIN_N of 200.
+- Net is negative with p < 0.05, so the subset is **not** declared tradeable.
+- The recorded prior said the opportunistic subset "will be stronger gross but will still
+  not clear the spread." Half right, and the wrong half is the interesting one: it was
+  **not stronger gross at all** (+2.08% against the pooled +2.07%). There was no routine
+  class to strip, because the 250,000 TRY disclosure threshold means routine trades are
+  never filed in the first place.
+
+The hypothesis is not refuted. It is inapplicable.
