@@ -71,10 +71,28 @@ DEFAULT_START = date(2015, 1, 1)
 # nothing had gone wrong: over 122 months that is ~2 hours of the run spent asleep on the
 # happy path. That is not WAF protection, it is a tax on success.
 #
-# The escalation ladder itself is kept intact - if KAP's WAF does disconnect the warmup
-# GET (httpx.RemoteProtocolError = IP throttled), back off 1 min, then 10, then 20. The
-# protection is now reactive, which is the only thing a backoff can usefully be.
-_WAF_BACKOFF_S = [60, 600, 1200]
+# The ladder used to escalate 60s -> 600s -> 1200s on the assumption that a longer silence
+# buys a bigger allowance from the WAF. It was never measured. Measured now, over 66
+# windows in the run's own log - counting how many disclosures got through between one
+# block and the next, bucketed by how long we had just slept:
+#
+#     silence      windows    disclosures passed before the next block
+#     < 2 min         36                 42.9
+#     2-8 min         11                 57.0
+#     10 min           7                 57.1
+#     20 min          12                 49.6
+#
+# It is flat. A 20-minute sleep buys the same ~50 disclosures as a 90-second one. The WAF's
+# budget is roughly "~50 requests, then block", and it refills within about two minutes -
+# so nearly all of the 10- and 20-minute sleeps were pure waste. Over the run that is many
+# hours spent waiting for an allowance we already had.
+#
+# It is not shortened to zero. In the two observed runs of 3+ consecutive short sleeps, the
+# 4th and 5th windows fell to 30 and 20 disclosures (n=1 each - thin, but pointing the
+# wrong way), so hammering without pause may still draw a penalty. The ladder keeps its
+# shape and loses its tail: escalate, but within the window where the budget is known to
+# refill.
+_WAF_BACKOFF_S = [60, 120, 240]
 
 # A courtesy gap between chunks so a long backfill does not arrive as one unbroken
 # burst. Small enough to be irrelevant to the runtime (122 x 2s = ~4 min), unlike the
@@ -254,7 +272,28 @@ async def main_async(
             _log.info("chunk_dry_run", from_date=from_date, to_date=to_date)
             continue
 
-        await _run_chunk(from_date, to_date)
+        # A month that exhausts its WAF backoffs must NOT kill the whole run. Its
+        # scraper_runs record is already written (PARTIAL, or FAILED if the warmup never
+        # got through), so a later sweep collects it - that is the entire point of the
+        # ledger. Before the ladder was shortened this rarely fired, because a 20-minute
+        # backoff usually outlasted the block; now that the tail is gone a genuinely
+        # blocked month exhausts faster, and letting its RuntimeError propagate abandoned
+        # every remaining month behind it. Log it and move on.
+        try:
+            await _run_chunk(from_date, to_date)
+        except Exception as exc:
+            # ANY unhandled per-chunk failure is contained, not just the RuntimeError from
+            # exhausted WAF backoffs. A dead proxy returning 402 Payment Required crashed a
+            # whole run once because it surfaced as httpx.ProxyError, which the narrower
+            # `except RuntimeError` did not catch. The month's ledger record is written by
+            # scraper.run() before it re-raises, so a sweep collects it; one bad month must
+            # never abandon the months behind it, whatever killed it.
+            _log.warning(
+                "chunk_abandoned",
+                from_date=from_date,
+                to_date=to_date,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         await asyncio.sleep(_CHUNK_GAP_S)
 
     if dry_run:

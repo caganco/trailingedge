@@ -1,5 +1,6 @@
 """KAP insider scraper orchestrator."""
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -46,6 +47,14 @@ _QUARANTINE_DIR = Path("reports/parse_failures")
 # (measured 76 -> 34), which keeps the PARTIAL set small enough for the recovery pass.
 _WAF_COOLDOWNS_S = (90,)
 
+# How many disclosures to fetch at once. Sequential ingest is round-trip-latency bound: each
+# request to KAP through a proxy is ~1s wall time and we sat idle waiting for it, so raising
+# the per-IP rate limit barely moved throughput (measured 65 -> 72/min). Concurrency is the
+# real lever - N requests in flight at once, each handed a different pool IP by the client's
+# round-robin. Bounded because the DB pool is 15 connections and because a public disclosure
+# server should not be hit by an unbounded fan-out. 1 preserves the old sequential behaviour.
+_CONCURRENCY = max(1, int(os.environ.get("KAP_CONCURRENCY", "1")))
+
 
 @dataclass
 class ScraperRunResult:
@@ -84,6 +93,45 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                 )
             )
             return set(rows.scalars().all())
+
+    async def _ingest_batch(
+        self,
+        kap: "KapClient",
+        discs: list[dict],
+        counts: "_Counts",
+        already_stored: set[str],
+        *,
+        final: bool,
+        attempt: int,
+    ) -> list[dict]:
+        """Ingest a batch of disclosures with bounded concurrency, returning those that
+        failed (to be retried in a later cooldown pass, or counted as lost on the final one).
+
+        Concurrency is what makes the proxy pool actually parallel: up to _CONCURRENCY
+        disclosures are in flight at once, and the client hands each one a different pool IP.
+        The shared mutable state this touches is safe under asyncio's single thread - a
+        coroutine only yields at an await, and neither ``deferred.append`` nor the ``counts``
+        increments inside _ingest_one span one, so there is no torn read-modify-write.
+        """
+        sem = asyncio.Semaphore(_CONCURRENCY)
+        deferred: list[dict] = []
+
+        async def _one(disc: dict) -> None:
+            async with sem:
+                try:
+                    await self._ingest_one(kap, disc, counts, already_stored)
+                except Exception as exc:
+                    deferred.append(disc)
+                    _log.log(
+                        40 if final else 30,  # ERROR only on the last cooldown round
+                        "disclosure_error" if final else "disclosure_deferred",
+                        kap_disclosure_id=str(disc.get("disclosureIndex", "")),
+                        attempt=attempt or None,
+                        error=str(exc),
+                    )
+
+        await asyncio.gather(*(_one(d) for d in discs))
+        return deferred
 
     async def _ingest_one(
         self,
@@ -202,17 +250,9 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                 # them on a real backfill, silently, while the run still said SUCCESS.
                 # A disconnect is transient, so a dropped disclosure is retried once
                 # after a cooldown; anything still missing downgrades the run to PARTIAL.
-                deferred: list[dict] = []
-                for disc in disclosures:
-                    try:
-                        await self._ingest_one(kap, disc, counts, already_stored)
-                    except Exception as exc:
-                        deferred.append(disc)
-                        _log.warning(
-                            "disclosure_deferred",
-                            kap_disclosure_id=str(disc.get("disclosureIndex", "")),
-                            error=str(exc),
-                        )
+                deferred = await self._ingest_batch(
+                    kap, disclosures, counts, already_stored, final=False, attempt=0
+                )
 
                 for attempt, cooldown in enumerate(_WAF_COOLDOWNS_S, start=1):
                     if not deferred:
@@ -224,20 +264,14 @@ class KapInsiderScraper(AbstractScraper[ScraperRunResult]):
                         sleep_s=cooldown,
                     )
                     await asyncio.sleep(cooldown)
-                    retrying, deferred = deferred, []
-                    for disc in retrying:
-                        try:
-                            await self._ingest_one(kap, disc, counts, already_stored)
-                        except Exception as exc:
-                            deferred.append(disc)
-                            last = attempt == len(_WAF_COOLDOWNS_S)
-                            _log.log(
-                                40 if last else 30,  # ERROR on the final round, else WARNING
-                                "disclosure_error" if last else "disclosure_deferred",
-                                kap_disclosure_id=str(disc.get("disclosureIndex", "")),
-                                attempt=attempt,
-                                error=str(exc),
-                            )
+                    deferred = await self._ingest_batch(
+                        kap,
+                        deferred,
+                        counts,
+                        already_stored,
+                        final=attempt == len(_WAF_COOLDOWNS_S),
+                        attempt=attempt,
+                    )
                 lost = len(deferred)
 
         except Exception as exc:
