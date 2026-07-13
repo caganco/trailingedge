@@ -192,6 +192,21 @@ async def _fetch_batch(
                     continue
 
                 insert_stmt = pg_insert(PriceHistory.__table__).values(values_list)
+                # The exchange bulletin is authoritative and yfinance must not overwrite
+                # it. They are not interchangeable sources of the same number:
+                #
+                #   - the bulletin is survivorship-clean; yfinance serves NOTHING for a
+                #     delisted BIST ticker, not even the years it traded.
+                #   - the bulletin carries the VBTS flags (gross settlement, suspension).
+                #   - scripts/load_official_prices.py stores close_try as a chained
+                #     total-return index with the matching raw print in raw_close_try.
+                #     Letting yfinance replace close_try alone would leave the pair
+                #     inconsistent - an index from one source, a price from another - and
+                #     the cost model reads both.
+                #
+                # So a row that already has raw_close_try came from the bulletin and is
+                # left alone. yfinance stays what it is genuinely needed for: the XU100
+                # benchmark, which is an index and appears in no equity bulletin.
                 upsert_stmt = insert_stmt.on_conflict_do_update(
                     constraint="uq_price_ticker_date",
                     set_={
@@ -201,6 +216,7 @@ async def _fetch_batch(
                         "low_try": insert_stmt.excluded.low_try,
                         "volume": insert_stmt.excluded.volume,
                     },
+                    where=PriceHistory.__table__.c.raw_close_try.is_(None),
                 )
                 await session.execute(upsert_stmt)
                 results[ticker] = len(values_list)
