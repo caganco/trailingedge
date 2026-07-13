@@ -35,6 +35,16 @@ _log = get_logger(__name__)
 # this long before the rotation returns to it.
 _IP_COOLDOWN_S = 120.0
 
+# Proactive pacing, to stay UNDER the WAF budget rather than crashing into it. Measured over
+# 87 windows in one backfill, requests between one block and the next ran to a median of 161
+# (p10 = 43 - the budget is noisy, not a clean token bucket). So a spent IP does not have to
+# be the trigger: after this many requests we pause for the refill window on our own, and the
+# block - with its deferrals, its PARTIAL month, and the recovery sweep that PARTIAL forces -
+# mostly never happens. Pacing under the budget is what lets a month finish SUCCESS on the
+# first pass. Set KAP_PACE_EVERY=0 to disable.
+_PACE_EVERY = int(os.environ.get("KAP_PACE_EVERY", "120"))
+_PACE_SLEEP_S = float(os.environ.get("KAP_PACE_SLEEP_S", "120"))
+
 
 def _load_proxies() -> list[str | None]:
     """Proxy URLs for the rotation pool, or ``[None]`` for a direct connection.
@@ -100,6 +110,7 @@ class RateLimitedClient:
         self._clients: list[httpx.AsyncClient] = []
         self._limiters: list[AsyncLimiter] = []
         self._cooling_until: list[float] = []
+        self._since_pause: list[int] = []  # requests on each IP since its last proactive pause
         self._idx = 0
 
     async def __aenter__(self) -> "RateLimitedClient":
@@ -114,6 +125,7 @@ class RateLimitedClient:
             )
             self._limiters.append(AsyncLimiter(self._rps, 1.0))
             self._cooling_until.append(0.0)
+            self._since_pause.append(0)
         if len(self._proxies) > 1:
             _log.info("proxy_pool_active", pool_size=len(self._proxies))
         return self
@@ -167,6 +179,7 @@ class RateLimitedClient:
             except httpx.RemoteProtocolError as exc:
                 last_exc = exc
                 self._cooling_until[i] = time.monotonic() + _IP_COOLDOWN_S
+                self._since_pause[i] = 0  # the cooldown refills the budget
                 self._idx = (i + 1) % len(self._clients)
                 _log.info("proxy_ip_cooling", proxy_index=i, cooldown_s=_IP_COOLDOWN_S)
 
@@ -181,6 +194,16 @@ class RateLimitedClient:
     ) -> httpx.Response:
         client = self._clients[i]
         limiter = self._limiters[i]
+
+        # Pace under the budget before spending it. This IP has made _PACE_EVERY requests
+        # since its last pause, so it is approaching the block threshold - wait out the
+        # refill window now, on our terms, instead of hitting the wall and paying a backoff
+        # plus a PARTIAL month plus a recovery sweep.
+        if _PACE_EVERY > 0 and self._since_pause[i] >= _PACE_EVERY:
+            self._since_pause[i] = 0
+            _log.info("pace_pause", proxy_index=i, after_requests=_PACE_EVERY, sleep_s=_PACE_SLEEP_S)
+            await asyncio.sleep(_PACE_SLEEP_S)
+        self._since_pause[i] += 1
 
         @retry(
             retry=retry_if_exception(_is_retryable),

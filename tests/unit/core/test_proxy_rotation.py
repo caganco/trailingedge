@@ -11,13 +11,16 @@ import time
 import httpx
 import pytest
 
+from trailing_edge.core import http as http_mod
 from trailing_edge.core.http import RateLimitedClient, _load_proxies
 
 
 @pytest.fixture(autouse=True)
 def _no_ambient_proxies(monkeypatch, tmp_path):
-    """Keep a developer's real proxies.txt or KAP_PROXIES out of the unit tests."""
+    """Keep a developer's real proxies.txt or KAP_PROXIES out of the unit tests, and hold
+    the proactive pacer off so these rotation tests do not sleep."""
     monkeypatch.delenv("KAP_PROXIES", raising=False)
+    monkeypatch.setattr(http_mod, "_PACE_EVERY", 0)
     monkeypatch.chdir(tmp_path)
 
 
@@ -58,6 +61,35 @@ async def test_single_client_surfaces_waf_disconnect_unchanged(monkeypatch):
             await client.get("https://kap.org.tr/x")
         # surfaced immediately, not retried inline
         assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_pacer_pauses_before_the_budget_is_spent(monkeypatch):
+    """After _PACE_EVERY requests on an IP, the next request waits out the refill window
+    instead of continuing into a block. This is what keeps a month finishing SUCCESS on the
+    first pass rather than going PARTIAL and needing a sweep."""
+    monkeypatch.setattr(http_mod, "_PACE_EVERY", 3)
+    monkeypatch.setattr(http_mod, "_PACE_SLEEP_S", 0.0)
+
+    client = RateLimitedClient()
+    async with client:
+        slept: list[int] = []
+
+        async def fake_sleep(s):
+            slept.append(s)
+
+        monkeypatch.setattr(http_mod.asyncio, "sleep", fake_sleep)
+
+        async def ok(*a, **k):
+            return httpx.Response(200, request=httpx.Request("GET", "https://k/x"))
+
+        monkeypatch.setattr(client._clients[0], "request", ok)
+
+        # 3 requests fit under the budget, the 4th triggers one proactive pause
+        for _ in range(4):
+            await client.get("https://kap.org.tr/x")
+
+    assert slept.count(0.0) == 1, "exactly one proactive pause after PACE_EVERY requests"
 
 
 @pytest.mark.asyncio
