@@ -276,6 +276,38 @@ Closing it needs the KAP backfill to reach 2026. That is a data-collection probl
 methodological one, and it does not touch the mechanism: the spread eating the alpha is a
 microstructure fact about illiquid names, not a regime phenomenon.
 
+**The ingest is not complete, and the completion metric is not the obvious one.** A chunk
+can lose filings to a WAF disconnect and still log `chunk_done`; the ledger records the
+month `PARTIAL`, not `SUCCESS`. Counting `chunk_done` therefore overstates progress badly -
+at the time of writing it read 92 of 139 months while `scraper_runs` held **20 SUCCESS, 82
+PARTIAL, 44 FAILED**. 2016 and 2020 contained not one complete month.
+
+The loss is recoverable: `backfill_kap_insider.py` replays non-SUCCESS months, fresh months
+first and WAF stragglers last. But its `todo` list is computed once at startup, so a month
+that goes PARTIAL *during* a run is not swept by that same run - the script must simply be
+re-run until the SUCCESS count stops rising. **The completion criterion is
+`count(SUCCESS) ≈ 139`, never the log's chunk count.**
+
+Direction of the error: WAF drops are unrelated to what a filing predicts, so this should
+thin the sample rather than tilt it. That is an argument, not a measurement, and it is
+recorded as such.
+
+**~1,200 filings are quarantined, and about three quarters of them are permanently
+unreadable.** A DKB PDF that yields no transactions is quarantined to
+`reports/parse_failures/` rather than silently skipped. Sampling those files, **75% carry no
+extractable text at all** - they are scanned images with no text layer, and no parser will
+ever read them. They are a hard ceiling of the same kind as the 250,000 TRY disclosure
+threshold: a property of the source, not a bug to be fixed. Recovering them would need OCR,
+which is not attempted here and would need its own accuracy audit before any number it
+produced could be trusted.
+
+The remaining quarter do carry text, and they fail for a different reason: they are
+**narrative filings with no table at all** ("... 3,63 - 3,64 TL fiyat aralığından 9.911 adet
+satış işlemi gerçekleşmiştir"), so the arithmetic row-validation gate has nothing to bind
+to. Those are recoverable in principle. The final quarantine rate must be recomputed once
+the ingest is complete, because the current per-year rates (13% in 2015 rising to 32% in
+2020) are measured against a denominator that is itself incomplete.
+
 **Cluster scoring is close to single-factor.** `cluster_score` blends insider count (0.50),
 role seniority (0.30) and recency (0.20). In historical mode recency is pinned at 1.0, so
 20% of the weight is a constant, and seniority falls back to its 0.5 default wherever the
