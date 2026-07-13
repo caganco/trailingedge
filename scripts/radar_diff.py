@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -49,8 +48,9 @@ def _dedupe_clusters(clusters: list[dict]) -> dict[str, dict]:
 
 async def _get_current_clusters() -> list[dict]:
     """Query insider_clusters and return raw rows as a list of dicts."""
-    from trailing_edge.core.db import get_session, init_db
     from sqlalchemy import text
+
+    from trailing_edge.core.db import get_session, init_db
 
     await init_db()
     async with get_session() as session:

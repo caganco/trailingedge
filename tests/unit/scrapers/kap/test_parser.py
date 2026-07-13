@@ -69,8 +69,15 @@ def test_oda_parser_does_not_crash(oda_html):
     assert isinstance(result, list)
 
 
-def test_post_tx_ownership_pct_implausible_value_becomes_none(monkeypatch, dkb_pdf_bytes):
-    """Validation guard clamps an astronomic ownership % (e.g. 5,260,000) to None."""
+def test_row_with_implausible_ownership_pct_is_rejected_whole(monkeypatch, dkb_pdf_bytes):
+    """An out-of-range percentage means the columns are misaligned - the WHOLE row goes.
+
+    The previous policy nulled the percentage and kept the rest of the row. That is
+    how 21% of stored transactions ended up with silently wrong share counts: a row
+    that has already proven its columns shifted cannot be trusted in any field.
+    Rejecting loses one recoverable row; keeping it poisons every statistic built on
+    top. This test pins the stricter contract.
+    """
     orig = parser_mod._extract_table_rows
 
     def _inject_implausible(text: str):
@@ -82,9 +89,7 @@ def test_post_tx_ownership_pct_implausible_value_becomes_none(monkeypatch, dkb_p
 
     monkeypatch.setattr(parser_mod, "_extract_table_rows", _inject_implausible)
     txs = parse_dkb_transactions(dkb_pdf_bytes, ticker="TEST")
-    assert txs, "Expected at least one transaction row from fixture"
-    for tx in txs:
-        assert tx.post_tx_ownership_pct is None or tx.post_tx_ownership_pct <= 100
+    assert txs == [], "a row with an impossible percentage must be dropped, not patched"
 
 
 def test_column_mapping_missing_header_returns_none():

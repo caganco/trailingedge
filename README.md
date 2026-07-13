@@ -1,9 +1,9 @@
 # TrailingEdge
 
-> **Asynchronous Python data engine that ingests SPK II-15.1 insider
-> transaction disclosures from KAP (kap.org.tr), measures empirical
-> forward returns, and produces per-company insider-activity briefs for
-> BIST-listed companies.**
+> **Do BIST insiders' disclosed purchases predict returns you can actually capture?**
+>
+> They predict. You cannot capture them. This is the pipeline that measures both,
+> and the second half is the finding.
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 [![PostgreSQL](https://img.shields.io/badge/postgres-16-336791.svg)](https://www.postgresql.org)
@@ -13,6 +13,61 @@
 [![Ruff](https://img.shields.io/badge/ruff-checked-d7ff64.svg)](https://github.com/astral-sh/ruff)
 
 ---
+
+## The result
+
+Insider-cluster events on Borsa İstanbul, 2015-2018. Entry is t+1 after the KAP
+disclosure is *public*, returns are measured in excess of XU100 over the same held
+interval, and the round-trip cost is estimated per trade from that stock's own OHLC
+(Abdi-Ranaldo 2017) rather than assumed as a flat fee.
+
+| Horizon | N | Gross AR | Cost | **Net AR** | t (net) |
+|---|---:|---:|---:|---:|---:|
+| 5d | 1,070 | +0.66% | 3.37% | **−2.71%** | −12.91 |
+| 20d | 1,070 | +2.02% | 3.37% | **−1.35%** | −3.31 |
+| 60d | 1,071 | +2.18% | 3.37% | **−1.20%** | −1.86 |
+
+**The signal is real. The gross abnormal return is significantly positive at every
+horizon** (20d: +2.07%, t = 5.36, N = 1,079). **And it is not tradeable**, because insider
+clusters fire in illiquid small caps whose bid-ask spread is wider than the alpha: the
+median round trip costs 1.93%, the upper quartile 4.34%. Nothing survives crossing it
+twice. At 60 days the net loss is no longer statistically distinguishable from zero
+(t = −1.86) - which buys nothing: the point estimate is still negative, and "you might
+merely break even after three months" is not an edge either.
+
+That is the whole finding, and it is why this repository exists. A gross number is not
+an edge; an edge is what is left after the market takes its cut.
+
+Everything below is the machinery required to be able to say that honestly - and the
+audit trail of the silent data faults that had to be found first, each of which had
+moved the number:
+
+| | |
+|---|---|
+| KAP's list endpoint truncates at 2,000 rows, keeping the newest | ~75% of every month was being discarded |
+| The transaction-date regex accepted `/` but not `.` | every filing before 2021 parsed to **zero** transactions |
+| Fixed column indices into a variable-width table | 21% of stored rows were silently wrong |
+| WAF disconnects were caught and skipped | 12% of disclosures vanished, run still reported `SUCCESS` |
+| Prices fetched in one batch; one bad symbol poisoned the rest | looked exactly like survivorship bias |
+| yfinance serves nothing for a delisted ticker | 31% of clusters dropped - the dead ones, the worst outcomes |
+| **The cost model read the total-return index as if it were a price** | the tick floor and ADV were wrong on 32% of ticker-days |
+| KAP's `relatedStocks` is not always one ticker | `KRDMA, KRDMB, KRDMD` joined to no price row; 14 clusters left every result in silence |
+
+The delisting fault was fixed by loading Borsa İstanbul's own end-of-day bulletin, which
+is survivorship-clean by construction: 1.3M rows, 749 tickers, against yfinance's 185. It
+also carries the VBTS tradability flags - which, once measured, turned out to touch only
+1% of entries and not to be the constraint at all.
+
+The cost fault is the one worth dwelling on, because it sat directly under the number that
+decides the answer. `close_try` is a *chained total-return index* - correct for returns,
+since a bonus issue halves the print and a raw series would read it as a 50% loss. It is
+not a price. But the tick floor is 0.01 TRY on the exchange's grid and ADV is price ×
+volume, and both were being fed the index. BIST companies issue bonus shares constantly,
+so the two series pull apart: a median 0.98× but ranging 0.60× to 118×. The error was not
+one-directional, so it was not conservative - it simply mispriced trades, worst in the
+serial bonus-issuers, which are small caps, which are precisely where the tick floor binds
+and where tradeability is decided. Fixing it *raised* N from 1,032 to 1,070 and left the
+verdict standing.
 
 ## What it does
 
@@ -33,13 +88,19 @@
   insider-transaction history, board-interlock graphs, and (optionally)
   Türkiye Ticaret Sicil Gazetesi cross-references.
 
-> **No edge is claimed.** This is measurement infrastructure, not a strategy. The
-> sample sizes reached so far are far below what is needed to distinguish an edge
-> from chance (~784 events; see `reports/sample/README.md`), and no transaction
-> cost or VBTS tradability filter is applied yet - so any positive figure this
-> pipeline produces is an upper bound, before frictions. The
-> [open issues](docs/METHODOLOGY.md#5-known-open-issues) are documented rather
-> than left for the reader to find.
+- **Prices trades against the exchange's own bulletin**, not a retail feed: survivorship-
+  clean by construction, corporate-action-adjusted by chaining the exchange's restated
+  previous close, and carrying the VBTS gross-settlement and suspension flags.
+- **Refuses to answer when it cannot.** `compute_base_rate` returns
+  `INSUFFICIENT_POWER` below ~784 events and `SURVIVORSHIP_BIASED` when too many
+  clusters cannot be priced. Both gates fired during this work, and both were right.
+
+> **What is claimed, precisely:** a statistically strong *gross* abnormal return
+> (20d: +2.07%, t = 5.36, N = 1,079, survivorship-clean) that does **not** survive a
+> per-trade cost estimate. The window is 2015-2018 - a single regime - so the result is
+> not yet regime-conditional, and that is stated rather than glossed. Remaining gaps are
+> in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md#6-still-open), not left for a
+> reader to discover.
 
 ## Türkçe özet
 
@@ -91,52 +152,40 @@ trailingedge scrape kap-insider --last-hours 168     # last week
 trailingedge scrape kap-insider --since 2026-05-01 --until 2026-05-27
 ```
 
-Forensic brief for a single ticker:
+Insider-activity brief for a single ticker (HTML + PDF):
 
 ```bash
-trailingedge report forensic KAPLM
+trailingedge report generate --ticker SARKY
 ```
 
-## Sample output - daily signal
+## Reproducing the result
 
-`reports/sample/daily_signal.example.json` (committed sample, names/ticker
-anonymized - live runs write real KAP names to git-ignored `reports/`):
-
-```json
-{
-  "as_of_date": "2026-05-28",
-  "clusters": [
-    {
-      "ticker": "XXXXX",
-      "cluster_score": 42.83,
-      "insider_count": 2,
-      "window_start": "2026-05-21",
-      "window_end": "2026-05-21",
-      "unique_insiders": ["INSIDER A", "INSIDER B"],
-      "total_buy_value_try": 711360.0
-    }
-  ],
-  "base_rates": {
-    "20": {
-      "benchmark_ticker": "XU100",
-      "signals_with_outcome": 0,
-      "verdict": "INSUFFICIENT_POWER",
-      "required_n_for_power": 784,
-      "hit_rate_pct": 0.0,
-      "hit_rate_ci_95": [0.0, 0.0],
-      "mean_abnormal_return_pct": 0.0,
-      "p_value": 1.0
-    }
-  }
-}
+```bash
+trailingedge prices backfill                    # XU100 benchmark (yfinance)
+python scripts/load_official_prices.py          # exchange bulletin: survivorship-clean
+trailingedge signal detect                      # clusters + market-adjusted outcomes
+python scripts/check_forward_returns.py         # gross abnormal return, with its gates
+python scripts/net_of_cost.py                   # the one that decides it
 ```
 
-Returns are **market-adjusted** against XU100 over the position's own held interval,
-and entry is t+1 after the disclosure is public. Every estimate carries a Wilson
-interval, a t-test, and a `verdict` - and `INSUFFICIENT_POWER` is a gate, not a
-footnote: below ~784 events the point estimates are not evidence in either direction,
-so the report declines to offer one. See [`reports/sample/README.md`](reports/sample/README.md)
-for what the previous (raw-return, N=29) version of this file claimed and why it was void.
+`net_of_cost.py` is the script that answers the question:
+
+```
+=== Abnormal return, NET of round-trip cost (order 25,000 TRY) ===
+    spread: Abdi-Ranaldo (2017) from the stock's own OHLC, per trade
+    dropped (no cost estimate): 27
+    round-trip cost: median 1.93%  p25 1.19%  p75 4.34%
+
+HORIZON     N  GROSS AR%   COST%  NET AR%   HIT%          95% CI      t  VERDICT
+     5d  1070       0.66    3.37    -2.71   26.9    [24.3, 29.7] -12.91  LOSES MONEY (net)
+    20d  1070       2.02    3.37    -1.35   41.3    [38.4, 44.3]  -3.31  LOSES MONEY (net)
+    60d  1071       2.18    3.37    -1.20   44.4    [41.5, 47.4]  -1.86  NO EDGE (net)
+```
+
+The spread is not a parameter. It is estimated for each trade from the 30 sessions of
+that stock's own OHLC before entry - which is also the only estimator that works on the
+delisted names the bulletin carries and no quote feed does. A flat fee would have made
+the answer come out the other way.
 
 ## Technical highlights
 

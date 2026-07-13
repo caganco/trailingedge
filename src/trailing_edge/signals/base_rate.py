@@ -34,7 +34,7 @@ import statistics
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from trailing_edge.core.config import get_config
 from trailing_edge.core.db import get_session
@@ -52,6 +52,19 @@ INSUFFICIENT_POWER = "INSUFFICIENT_POWER"
 NO_EDGE_DETECTED = "NO_EDGE_DETECTED"
 EDGE_DETECTED = "EDGE_DETECTED"
 NEGATIVE_EDGE = "NEGATIVE_EDGE"
+SURVIVORSHIP_BIASED = "SURVIVORSHIP_BIASED"
+
+# Above this share of clusters dropped for want of price data, no verdict is safe.
+#
+# A cluster with no price series contributes nothing to the mean - and the tickers
+# that have no price series are overwhelmingly the ones that were DELISTED. Measured
+# on a real run: 326 of 910 clusters (36%) silently vanished this way, and the names
+# behind them (ACSEL, ANELT, ARBUL, BISAS, BMEKS...) are exactly the small caps that
+# went to zero. Their absence is not random; it removes the worst outcomes and leaves
+# the mean looking like an edge. This gate exists because the number it suppresses -
+# +2.45% abnormal at 20 days, t=6.07 - was the most convincing wrong answer this
+# pipeline has ever produced.
+_MAX_ATTRITION = 0.10
 
 
 @dataclass
@@ -76,6 +89,10 @@ class BaseRateStats:
     # of it was simply the market. Never report these as evidence of an edge.
     mean_raw_return_pct: Decimal
     mean_benchmark_return_pct: Decimal
+
+    # Share of clusters that could not be priced at all. Their tickers are mostly
+    # DELISTED, so the attrition is not random - it deletes the worst outcomes.
+    attrition_pct: Decimal
 
     required_n_for_power: int
     verdict: str
@@ -142,6 +159,7 @@ def _empty(horizon_days: int, total: int, need: int) -> BaseRateStats:
         worst_abnormal_return_pct=_ZERO,
         mean_raw_return_pct=_ZERO,
         mean_benchmark_return_pct=_ZERO,
+        attrition_pct=_ZERO,
         required_n_for_power=need,
         verdict=INSUFFICIENT_POWER,
     )
@@ -179,6 +197,17 @@ async def compute_base_rate(
         )
         rows = (await session.execute(stmt)).all()
 
+    # Clusters that produced NO priceable outcome at all. Counting only the rows that
+    # HAVE an outcome hides them - and they are not missing at random.
+    async with get_session() as session:
+        total_clusters = (
+            await session.execute(
+                select(func.count())
+                .select_from(InsiderCluster)
+                .where(InsiderCluster.cluster_score >= min_score)
+            )
+        ).scalar_one()
+
     total_signals = len(rows)
     scored = [r for r in rows if r.abnormal_return_pct is not None]
 
@@ -206,7 +235,14 @@ async def compute_base_rate(
     t_stat, p_value = t_test_vs_zero(ar)
     mean_ar = statistics.fmean(ar)
 
-    if n < need:
+    attrition = (total_clusters - n) / total_clusters if total_clusters else 0.0
+
+    if attrition > _MAX_ATTRITION:
+        # Not a footnote. A third of the clusters vanishing because their companies
+        # were delisted removes the worst outcomes and manufactures an edge; no
+        # verdict computed on the survivors can be trusted.
+        verdict = SURVIVORSHIP_BIASED
+    elif n < need:
         verdict = INSUFFICIENT_POWER
     elif p_value >= 0.05:
         verdict = NO_EDGE_DETECTED
@@ -222,6 +258,7 @@ async def compute_base_rate(
         required_n=need,
         mean_abnormal_return_pct=round(mean_ar, 4),
         p_value=round(p_value, 4),
+        attrition_pct=round(attrition * 100, 1),
         verdict=verdict,
     )
 
@@ -241,6 +278,7 @@ async def compute_base_rate(
         worst_abnormal_return_pct=_dec(min(ar)),
         mean_raw_return_pct=_dec(statistics.fmean(raw)) if raw else _ZERO,
         mean_benchmark_return_pct=_dec(statistics.fmean(bench)) if bench else _ZERO,
+        attrition_pct=_dec(attrition * 100),
         required_n_for_power=need,
         verdict=verdict,
     )

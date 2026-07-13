@@ -23,9 +23,9 @@ SEARCH_COMPANY = "Hera Teknik Yapi"
 
 
 async def main() -> None:
-    from playwright.async_api import async_playwright
+
     from pdfminer.high_level import extract_text as pdf_extract
-    import re
+    from playwright.async_api import async_playwright
 
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 

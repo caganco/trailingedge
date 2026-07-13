@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     ForeignKey,
     Index,
@@ -32,6 +33,25 @@ class PriceHistory(Base):
     low_try: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     close_try: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     volume: Mapped[int | None] = mapped_column(BigInteger)
+
+    # close_try is a chained total-return index, which is what returns must be computed
+    # from. It is NOT the price the stock printed: BIST bonus issues push the two apart,
+    # by a median 0.98x but up to 118x. The tick floor (0.01 TRY on a grid) and ADV
+    # (price x volume) are properties of the traded price, so the cost model reads this
+    # column instead. NULL means the row predates migration 0008 and the price was never
+    # kept - the cost model must refuse it, not fall back to the index.
+    raw_close_try: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+
+    # VBTS tradability, straight from the exchange bulletin. A name under gross
+    # settlement cannot be round-tripped the way a backtest assumes, and a suspended
+    # one cannot be traded at all - the signal fires precisely in the names this
+    # happens to.
+    gross_settlement: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    suspended: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     fetched_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
