@@ -170,7 +170,11 @@ class RateLimitedClient:
                 _PACE_STATE[ip] = 0  # the refill wait restores the budget
                 _log.info("pace_pause", proxy_index=i, after_requests=_PACE_EVERY, sleep_s=_PACE_SLEEP_S)
                 continue
-            self._idx = i
+            # Advance the cursor so the NEXT acquire starts at the following IP. Sequentially
+            # this spreads load round-robin (each IP's budget lasts n times longer in wall
+            # time); under concurrency it hands each in-flight request a different IP, which
+            # is what turns the pool from a failover into real parallelism.
+            self._idx = (i + 1) % n
             return i
         return None
 

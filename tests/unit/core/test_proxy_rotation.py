@@ -162,11 +162,13 @@ async def test_a_pace_limited_ip_rotates_instead_of_sleeping(monkeypatch):
         for i, c in enumerate(client._clients):
             monkeypatch.setattr(c, "request", make(i))
 
-        # IP0 serves 2, hits pace, parks; IP1 serves the next 2; IP2 the next 2 - no sleeps
+        # Round-robin spreads the 6 requests two full cycles across the 3 IPs. Each IP reaches
+        # its pace budget on the second cycle but is only parked on the NEXT acquire, so no
+        # request in this batch has to sleep - a fresh IP is always available.
         for _ in range(6):
             await client.get("https://kap.org.tr/x")
 
-        assert seen == [0, 0, 1, 1, 2, 2]
+        assert seen == [0, 1, 2, 0, 1, 2]
         assert slept == [], "a pool must rotate on pace, never sleep while a fresh IP exists"
 
 
@@ -216,9 +218,10 @@ async def test_whole_pool_blocking_in_one_call_surfaces_the_waf(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_healthy_ip_is_drained_not_round_robined(monkeypatch):
-    """With the pacer off, requests are sequential and a healthy IP just keeps serving -
-    it is drained, not spread across the pool one request at a time."""
+async def test_healthy_ips_are_used_round_robin(monkeypatch):
+    """Each acquire advances the cursor, so successive requests spread across the pool. This
+    is what lets concurrency hand each in-flight request a different IP, and it also makes a
+    single IP's budget last n times longer in wall time."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1,http://ip2:1")
     client = RateLimitedClient()
 
@@ -234,16 +237,17 @@ async def test_a_healthy_ip_is_drained_not_round_robined(monkeypatch):
         for i, c in enumerate(client._clients):
             monkeypatch.setattr(c, "request", make(i))
 
-        for _ in range(3):
+        for _ in range(6):
             await client.get("https://kap.org.tr/x")
 
-        assert seen == [0, 0, 0]  # drained, not spread
+        assert seen == [0, 1, 2, 0, 1, 2]  # round-robin across the pool
 
 
 @pytest.mark.asyncio
-async def test_rotation_advances_only_when_the_current_ip_blocks(monkeypatch):
-    """IP0 serves once, then blocks; the retry lands on IP1, which serves the rest.
-    Sequence: 0 (ok), 0 (block -> rotate), 1 (ok), 1 (ok)."""
+async def test_a_block_parks_and_the_call_still_succeeds_under_round_robin(monkeypatch):
+    """Round-robin picks IP0, IP1, then IP0 again - and on that third request IP0 blocks, so
+    the call parks it and completes on IP1. Sequence: 0 (ok), 1 (ok), 0 (block -> rotate),
+    1 (ok)."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1")
     client = RateLimitedClient()
 
@@ -268,4 +272,5 @@ async def test_rotation_advances_only_when_the_current_ip_blocks(monkeypatch):
         for _ in range(3):
             await client.get("https://kap.org.tr/x")
 
-        assert seen == [0, 0, 1, 1]
+        assert seen == [0, 1, 0, 1]
+        assert client._cooling_until[0] > time.monotonic()  # IP0 parked after its block
