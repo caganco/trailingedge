@@ -77,6 +77,29 @@ def test_spread_returns_none_only_when_there_is_no_history():
     assert abdi_ranaldo_spread_pct([], [], []) is None
 
 
+def test_tick_floor_keys_off_the_traded_price_not_the_adjusted_index():
+    """price_history.close_try is a chained total-return index, not a price. A serial
+    bonus-issuer's index can sit far above its actual print - 118x at the extreme on
+    2018-12 data. The tick floor is 0.01 TRY on the exchange's grid, so keying it off the
+    index divides the floor by that factor and hands the trade a spread it could never
+    get. The estimator is scale-free and stays on the index; the floor takes the price.
+    """
+    n = 40
+    # a quiet window, so the estimate IS the floor and nothing else can mask the error
+    closes = [Decimal("100")] * n  # index level
+    highs = [Decimal("100")] * n
+    lows = [Decimal("100")] * n
+
+    traded = Decimal("2.50")  # what the stock actually prints after its bonus issues
+
+    on_index = abdi_ranaldo_spread_pct(closes, highs, lows)
+    on_price = abdi_ranaldo_spread_pct(closes, highs, lows, last_traded_price=traded)
+
+    assert on_index == tick_floor_pct(Decimal("100"))  # 0.02/100 = 2bp - fiction
+    assert on_price == tick_floor_pct(traded)  # 0.01/2.50 = 40bp - the real grid
+    assert on_price > on_index * 10
+
+
 def test_a_bad_price_inside_the_estimation_window_voids_the_estimate():
     closes, highs, lows = _series(40)
     closes[-3] = Decimal("0")  # inside the trailing 21-session window

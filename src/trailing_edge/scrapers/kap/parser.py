@@ -12,6 +12,42 @@ from trailing_edge.scrapers.kap.types import KapDisclosureDTO, KapInsiderTxDTO, 
 
 _log = get_logger(__name__)
 
+
+def split_related_tickers(related: str) -> list[str]:
+    """KAP's `relatedStocks` is not always one ticker.
+
+    The field was read as a plain string and stored whole, so a filing that names several
+    stocks produced a "ticker" like `KRDMA, KRDMB, KRDMD` - a key that joins to no price
+    row anywhere. Those clusters did not error; they silently dropped out of every result.
+    On the 2015-2019 sample this hit 12 distinct strings across ~131 disclosures and 14
+    clusters.
+
+    Two different things get comma-joined here:
+      - share classes of ONE issuer (KRDMA/KRDMB/KRDMD are Kardemir; ISATR/ISBTR/ISCTR/
+        ISKUR are Is Bankasi), and
+      - genuinely different issuers, when the filer is tied to more than one (ANELT, VERTU).
+
+    Which class the insider actually bought is in the filing body, not in this field. So
+    this function only SPLITS - it does not choose. Attribution is deliberately not
+    guessed: picking the first token, or the most liquid class, would put a real trade on
+    a stock that may not have been traded, and a plausible wrong ticker is worse than a
+    visible gap. Callers that get more than one ticker back must treat the disclosure as
+    unattributable and count it, not quietly drop it.
+    """
+    if not related:
+        return []
+    return [t for part in related.split(",") if (t := part.strip().upper())]
+
+
+def normalize_related_tickers(related: str) -> str:
+    """The multi-ticker string in a canonical, whitespace-free form (`A,B,C`).
+
+    Kept as the disclosure's ticker when attribution is impossible, so the ambiguity stays
+    visible in the data instead of being laundered into a single plausible ticker.
+    """
+    return ",".join(split_related_tickers(related))
+
+
 # Matches Turkish formatted numbers: 1.234.567,89 or 1.234 or 18,45 or -2.500.000
 _TR_NUM_RE = re.compile(r"-?[\d]{1,3}(?:\.[\d]{3})*(?:,[\d]+)?")
 
@@ -694,12 +730,21 @@ def parse_disclosure_metadata(
     basic = disc_wrap.get("disclosureBasic", disc_wrap)
 
     disclosure_index = str(basic.get("disclosureIndex", ""))
-    # relatedStocks is a plain string ticker in the real API (not a list of dicts)
     related = basic.get("relatedStocks", "")
-    ticker = (related.strip().upper() if isinstance(related, str) else "")
-    if not ticker and list_item:
+    raw_related = related if isinstance(related, str) else ""
+    if not raw_related.strip() and list_item:
         related_li = list_item.get("relatedStocks", "")
-        ticker = related_li.strip().upper() if isinstance(related_li, str) else ""
+        raw_related = related_li if isinstance(related_li, str) else ""
+
+    tickers = split_related_tickers(raw_related)
+    ticker = tickers[0] if len(tickers) == 1 else normalize_related_tickers(raw_related)
+    if len(tickers) > 1:
+        # Not attributable, and not silently guessable. See split_related_tickers.
+        _log.warning(
+            "multi_ticker_disclosure",
+            kap_disclosure_id=disclosure_index,
+            related_tickers=tickers,
+        )
 
     company = (
         basic.get("companyTitle", "")

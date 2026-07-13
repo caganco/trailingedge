@@ -84,7 +84,7 @@ async def main_async() -> None:
                     await session.execute(
                         text(
                             """
-                            SELECT close_try, high_try, low_try, volume
+                            SELECT close_try, high_try, low_try, volume, raw_close_try
                             FROM price_history
                             WHERE ticker = :t AND price_date < :d
                             ORDER BY price_date DESC LIMIT :n
@@ -93,22 +93,27 @@ async def main_async() -> None:
                         {"t": ticker, "d": entry, "n": _LOOKBACK},
                     )
                 ).all()
-                if len(px) < 22:
+                if len(px) < 22 or any(r[4] is None for r in px):
                     cache[key] = None
                 else:
                     px = list(reversed(px))
                     closes = [r[0] for r in px]
                     highs = [r[1] or r[0] for r in px]
                     lows = [r[2] or r[0] for r in px]
+                    # ADV and the tick floor take the traded price, not the adjusted index
+                    # - see scripts/net_of_cost.py and migration 0008.
+                    raws = [r[4] for r in px]
                     adv = Decimal(
                         str(
                             statistics.fmean(
-                                float(c) * float(r[3] or 0)
-                                for c, r in zip(closes, px, strict=True)
+                                float(rc) * float(r[3] or 0)
+                                for rc, r in zip(raws, px, strict=True)
                             )
                         )
                     )
-                    rt = round_trip_cost(closes, highs, lows, ORDER_TRY, adv)
+                    rt = round_trip_cost(
+                        closes, highs, lows, ORDER_TRY, adv, last_traded_price=raws[-1]
+                    )
                     cache[key] = (rt.total_pct,) if rt else None
             got = cache[key]
             return got[0] if got else None

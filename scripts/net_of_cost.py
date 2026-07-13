@@ -65,7 +65,7 @@ async def main_async(order_try: Decimal) -> None:
                 await session.execute(
                     text(
                         """
-                        SELECT close_try, high_try, low_try, volume
+                        SELECT close_try, high_try, low_try, volume, raw_close_try
                         FROM price_history
                         WHERE ticker = :t AND price_date < :d
                         ORDER BY price_date DESC LIMIT :n
@@ -82,10 +82,20 @@ async def main_async(order_try: Decimal) -> None:
             highs = [r[1] or r[0] for r in px]
             lows = [r[2] or r[0] for r in px]
             vols = [r[3] or 0 for r in px]
+
+            # close_try is the corporate-action-adjusted INDEX, which is what the spread
+            # estimator wants (it is scale-free and reads the adjusted series). The tick
+            # floor and ADV are properties of the traded PRICE, and BIST bonus issues push
+            # the two apart - median 0.98x but up to 118x. Using the index here understated
+            # the tick floor and inflated ADV, and both errors land in the cost model.
+            raws = [r[4] for r in px]
+            if any(r is None for r in raws):
+                cache[key] = None  # pre-0008 row: refuse rather than fall back to the index
+                return None
             adv = Decimal(
-                str(statistics.fmean(float(c) * float(v) for c, v in zip(closes, vols, strict=True)))
+                str(statistics.fmean(float(c) * float(v) for c, v in zip(raws, vols, strict=True)))
             )
-            cache[key] = (closes, highs, lows, adv)
+            cache[key] = (closes, highs, lows, adv, raws[-1])
             return cache[key]
 
         by_h: dict[int, list[tuple[float, float]]] = {}
@@ -97,8 +107,10 @@ async def main_async(order_try: Decimal) -> None:
             if w is None:
                 dropped += 1
                 continue
-            closes, highs, lows, adv = w
-            rt = round_trip_cost(closes, highs, lows, order_try, adv)
+            closes, highs, lows, adv, last_price = w
+            rt = round_trip_cost(
+                closes, highs, lows, order_try, adv, last_traded_price=last_price
+            )
             if rt is None:
                 dropped += 1
                 continue

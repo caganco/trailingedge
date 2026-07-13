@@ -7,11 +7,11 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from trailing_edge.models.base import Base
+import trailing_edge.models.graph  # noqa: F401 - register graph tables with metadata
 import trailing_edge.models.kap  # noqa: F401 - register KAP tables with metadata
 import trailing_edge.models.signal  # noqa: F401 - register signal tables with metadata
-import trailing_edge.models.graph    # noqa: F401 - register graph tables with metadata
 import trailing_edge.models.unlisted  # noqa: F401 - register unlisted tables with metadata
+from trailing_edge.models.base import Base
 
 config = context.config
 

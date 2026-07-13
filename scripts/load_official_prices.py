@@ -345,6 +345,11 @@ def chain_total_return(rows: list[dict]) -> list[dict]:
                 return (v * factor).quantize(Decimal("0.0001")) if v is not None else None
 
             prev_raw_close = raw_close
+            # The price the stock actually printed, before the chain replaces it with the
+            # index. The tick floor is 0.01 TRY on the exchange's grid and ADV is
+            # price x volume - both are properties of this number, not of the index, and
+            # BIST's serial bonus issues drive the two apart (median 0.98x, up to 118x).
+            r["raw_close_try"] = raw_close.quantize(Decimal("0.0001"))
             r["close_try"] = level.quantize(Decimal("0.0001"))
             r["open_try"] = _scale(r["open_try"])
             r["high_try"] = _scale(r["high_try"])
@@ -384,6 +389,7 @@ async def _store(rows: list[dict]) -> int:
                     constraint="uq_price_ticker_date",
                     set_={
                         "close_try": stmt.excluded.close_try,
+                        "raw_close_try": stmt.excluded.raw_close_try,
                         "open_try": stmt.excluded.open_try,
                         "high_try": stmt.excluded.high_try,
                         "low_try": stmt.excluded.low_try,

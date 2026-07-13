@@ -98,8 +98,6 @@ async def main() -> None:
         print("POPUP'TA CAPTCHA CIKACAK - goruntuleyin ama COZMEYIN (sadece inspect)")
         print("5 saniye bekleniyor popup icin...\n")
 
-        popup_holder = []
-
         async with page.expect_popup(timeout=30_000) as popup_info:
             await pdf_links[0].click()
 

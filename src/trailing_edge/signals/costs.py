@@ -104,6 +104,7 @@ def abdi_ranaldo_spread_pct(
     highs: list[Decimal],
     lows: list[Decimal],
     window: int = _SPREAD_WINDOW,
+    last_traded_price: Decimal | None = None,
 ) -> Decimal | None:
     """Effective bid-ask spread as a fraction, from OHLC alone (Abdi-Ranaldo 2017).
 
@@ -118,6 +119,12 @@ def abdi_ranaldo_spread_pct(
     window rather than voiding the estimate, and whatever survives is floored at one
     tick - the tightest quote the exchange's own price grid allows. None is returned
     only when there is genuinely not enough price history to look at.
+
+    The estimator itself is scale-free: it reads log(close) - log(high-low midpoint), so
+    a constant factor cancels, and it is CORRECT to run it on the adjusted index. The
+    tick floor is not scale-free - it is 0.01 TRY on the exchange's grid, so it needs the
+    price the stock actually printed. Pass it as ``last_traded_price``. Omitting it falls
+    back to the last close, which is right only when that close is a raw price.
     """
     for w in (window, 60, 120):
         g = _gamma(closes, highs, lows, w)
@@ -135,7 +142,8 @@ def abdi_ranaldo_spread_pct(
     if _gamma(closes, highs, lows, min(window, max(len(closes) - 1, 2))) is None:
         return None
 
-    floor = tick_floor_pct(closes[-1])
+    price = last_traded_price if last_traded_price is not None else closes[-1]
+    floor = tick_floor_pct(price)
     return max(est, floor).quantize(Decimal("0.000001"))
 
 
@@ -179,13 +187,19 @@ def round_trip_cost(
     lows: list[Decimal],
     order_value_try: Decimal,
     adv_try: Decimal,
+    last_traded_price: Decimal | None = None,
 ) -> RoundTrip | None:
     """Total cost of entering and exiting one position, as a percent of notional.
 
     None when the spread cannot be estimated: a trade whose cost is unknown must be
     excluded from the sample, not priced at zero.
+
+    ``last_traded_price`` is the raw printed close, used for the tick floor. ``adv_try``
+    must likewise be built from raw price x volume: feeding it the adjusted index inflates
+    ADV by the corporate-action factor and understates impact, which scales as
+    sqrt(1/ADV).
     """
-    spread = abdi_ranaldo_spread_pct(closes, highs, lows)
+    spread = abdi_ranaldo_spread_pct(closes, highs, lows, last_traded_price=last_traded_price)
     if spread is None:
         return None
 
