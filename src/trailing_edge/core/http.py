@@ -151,16 +151,27 @@ class RateLimitedClient:
             await client.aclose()
         self._clients.clear()
 
-    def _next_available(self) -> int | None:
-        """Index of the next proxy whose IP budget is not cooling, round-robin from the
-        last one used. None when every IP in the pool is currently cooling."""
+    def _acquire(self) -> int | None:
+        """Index of an IP that is ready to serve: neither cooling after a block nor at its
+        pace budget. An IP that has reached _PACE_EVERY requests is PARKED here - set cooling
+        for the refill window and skipped - rather than slept on. That is what makes the pool
+        fast: with one IP, parking it leaves nothing else and the caller waits (the proactive
+        pause); with ten, the other nine keep serving while it refills, so we rarely wait at
+        all. None when every IP is currently cooling or parked."""
         n = len(self._clients)
         now = time.monotonic()
         for step in range(n):
             i = (self._idx + step) % n
-            if self._cooling_until[i] <= now:
-                self._idx = i
-                return i
+            if self._cooling_until[i] > now:
+                continue
+            ip = self._proxies[i]
+            if _PACE_EVERY > 0 and _PACE_STATE.get(ip, 0) >= _PACE_EVERY:
+                self._cooling_until[i] = now + _PACE_SLEEP_S
+                _PACE_STATE[ip] = 0  # the refill wait restores the budget
+                _log.info("pace_pause", proxy_index=i, after_requests=_PACE_EVERY, sleep_s=_PACE_SLEEP_S)
+                continue
+            self._idx = i
+            return i
         return None
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
@@ -171,52 +182,43 @@ class RateLimitedClient:
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         assert self._clients, "Use as async context manager"
+        single = len(self._clients) == 1
+        blocks = 0
 
-        # Single direct connection (no pool): unchanged from the original - one client, one
-        # limiter, RemoteProtocolError surfaced straight to the caller.
-        if len(self._clients) == 1:
-            return await self._request_via(0, method, url, **kwargs)
-
-        # Pool: a RemoteProtocolError means this IP's budget is spent. Park it to refill and
-        # move to a fresh IP, trying each at most once. Only when the whole pool is cooling
-        # does the error surface to the scraper, which defers and waits it out as before.
-        last_exc: httpx.RemoteProtocolError | None = None
-        for _ in range(len(self._clients)):
-            i = self._next_available()
+        while True:
+            i = self._acquire()
             if i is None:
-                break
+                # Every IP is cooling or parked. Wait until the soonest is free, then retry.
+                # For a single IP this realises the proactive pace pause; for a pool it means
+                # the whole pool is momentarily spent.
+                wait = min(self._cooling_until) - time.monotonic()
+                await asyncio.sleep(max(wait, 0.05))
+                continue
             try:
-                return await self._request_via(i, method, url, **kwargs)
-            except httpx.RemoteProtocolError as exc:
-                last_exc = exc
+                resp = await self._request_via(i, method, url, **kwargs)
+                ip = self._proxies[i]
+                _PACE_STATE[ip] = _PACE_STATE.get(ip, 0) + 1
+                return resp
+            except httpx.RemoteProtocolError:
+                # This IP's budget is spent (or it is genuinely the WAF). Park it to refill.
                 self._cooling_until[i] = time.monotonic() + _IP_COOLDOWN_S
-                _PACE_STATE[self._proxies[i]] = 0  # the cooldown refills the budget
+                _PACE_STATE[self._proxies[i]] = 0
                 self._idx = (i + 1) % len(self._clients)
+                if single:
+                    # Unchanged single-IP contract: surface immediately so the scraper defers.
+                    raise
                 _log.info("proxy_ip_cooling", proxy_index=i, cooldown_s=_IP_COOLDOWN_S)
-
-        if last_exc is not None:
-            raise last_exc
-        # Every IP was already cooling before we tried any. Surface the WAF condition so the
-        # scraper defers, rather than busy-looping on a pool that has nothing to give.
-        raise httpx.RemoteProtocolError("all proxy IPs cooling")
+                blocks += 1
+                if blocks >= len(self._clients):
+                    # The whole pool blocked within this one call - nothing left to try now.
+                    # Surface it so the scraper defers rather than busy-looping.
+                    raise httpx.RemoteProtocolError("all proxy IPs cooling")
 
     async def _request_via(
         self, i: int, method: str, url: str, **kwargs: Any
     ) -> httpx.Response:
         client = self._clients[i]
         limiter = self._limiters[i]
-
-        # Pace under the budget before spending it. This IP has made _PACE_EVERY requests
-        # since its last pause, so it is approaching the block threshold - wait out the
-        # refill window now, on our terms, instead of hitting the wall and paying a backoff
-        # plus a PARTIAL month plus a recovery sweep. The counter is module-level and keyed
-        # by IP, so it survives the fresh client the backfill builds for each month.
-        ip = self._proxies[i]
-        if _PACE_EVERY > 0 and _PACE_STATE.get(ip, 0) >= _PACE_EVERY:
-            _PACE_STATE[ip] = 0
-            _log.info("pace_pause", proxy_index=i, after_requests=_PACE_EVERY, sleep_s=_PACE_SLEEP_S)
-            await asyncio.sleep(_PACE_SLEEP_S)
-        _PACE_STATE[ip] = _PACE_STATE.get(ip, 0) + 1
 
         @retry(
             retry=retry_if_exception(_is_retryable),

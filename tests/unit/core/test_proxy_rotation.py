@@ -1,10 +1,12 @@
 """Proxy pool rotation over the KAP WAF's per-IP budget.
 
 The WAF blocks per source IP (RemoteProtocolError), and the budget refills with wall time.
-A rotating pool exploits that: a spent IP is parked to refill while another carries on.
-These tests pin the two things that must hold - the no-proxy path is byte-for-byte the old
-behaviour, and a block rotates to a fresh IP rather than failing the request - without
-touching the network.
+A rotating pool exploits that: an IP that has spent its budget - whether it actually blocked,
+or reached the proactive pace limit - is PARKED to refill while the other IPs keep serving.
+With one IP, parking it leaves nothing else and the caller waits (the proactive pause). With
+ten, we almost never wait. These tests pin: the no-proxy path still surfaces a WAF disconnect
+straight to the scraper; a pace limit parks-and-rotates; a block parks-and-rotates; and a
+whole pool blocking within one call still surfaces so the scraper defers.
 """
 import time
 
@@ -18,8 +20,8 @@ from trailing_edge.core.http import RateLimitedClient, _load_proxies
 @pytest.fixture(autouse=True)
 def _no_ambient_proxies(monkeypatch, tmp_path):
     """Keep a developer's real proxies.txt or KAP_PROXIES out of the unit tests, hold the
-    proactive pacer off so these rotation tests do not sleep, and clear the module-level pace
-    counters so state cannot leak between tests."""
+    proactive pacer off by default so rotation tests do not sleep, and clear the module-level
+    pace counters so state cannot leak between tests."""
     monkeypatch.delenv("KAP_PROXIES", raising=False)
     monkeypatch.setattr(http_mod, "_PACE_EVERY", 0)
     http_mod._reset_pace_state()
@@ -69,15 +71,15 @@ async def test_single_client_surfaces_waf_disconnect_unchanged(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_pacer_pauses_before_the_budget_is_spent(monkeypatch):
-    """After _PACE_EVERY requests on an IP, the next request waits out the refill window
-    instead of continuing into a block. This is what keeps a month finishing SUCCESS on the
-    first pass rather than going PARTIAL and needing a sweep."""
+    """After _PACE_EVERY requests on the one IP, the next request finds it parked and waits
+    out the refill window - one proactive pause. This is what keeps a month finishing SUCCESS
+    on the first pass rather than going PARTIAL and needing a sweep."""
     monkeypatch.setattr(http_mod, "_PACE_EVERY", 3)
     monkeypatch.setattr(http_mod, "_PACE_SLEEP_S", 0.0)
 
     client = RateLimitedClient()
     async with client:
-        slept: list[int] = []
+        slept: list[float] = []
 
         async def fake_sleep(s):
             slept.append(s)
@@ -89,11 +91,11 @@ async def test_the_pacer_pauses_before_the_budget_is_spent(monkeypatch):
 
         monkeypatch.setattr(client._clients[0], "request", ok)
 
-        # 3 requests fit under the budget, the 4th triggers one proactive pause
+        # 3 requests fit under the budget, the 4th finds the IP parked and waits once
         for _ in range(4):
             await client.get("https://kap.org.tr/x")
 
-    assert slept.count(0.0) == 1, "exactly one proactive pause after PACE_EVERY requests"
+    assert len(slept) == 1, "exactly one proactive pause after PACE_EVERY requests"
 
 
 @pytest.mark.asyncio
@@ -102,8 +104,8 @@ async def test_pace_state_survives_a_fresh_client_across_chunks(monkeypatch):
     budget is global per-IP across months. When the counter lived on the client it reset
     every month and never fired on the sparse recent months - a run of short months spent
     the shared budget between them and blocked. The counter is module-level and keyed by IP,
-    so two requests through one client and two through the next must together trip the pace
-    at the 4th, not restart the count."""
+    so two requests through one client and two through the next together trip the pace at the
+    4th, not restart the count."""
     monkeypatch.setattr(http_mod, "_PACE_EVERY", 3)
     monkeypatch.setattr(http_mod, "_PACE_SLEEP_S", 0.0)
 
@@ -117,26 +119,61 @@ async def test_pace_state_survives_a_fresh_client_across_chunks(monkeypatch):
     async def ok(*a, **k):
         return httpx.Response(200, request=httpx.Request("GET", "https://k/x"))
 
-    # first "month": a fresh client makes 2 requests
     async with RateLimitedClient() as c1:
         monkeypatch.setattr(c1._clients[0], "request", ok)
         await c1.get("https://kap.org.tr/x")
         await c1.get("https://kap.org.tr/x")
 
-    # second "month": a brand-new client, same direct IP, makes 2 more
     async with RateLimitedClient() as c2:
         monkeypatch.setattr(c2._clients[0], "request", ok)
         await c2.get("https://kap.org.tr/x")
         await c2.get("https://kap.org.tr/x")
 
     # 4 requests on the one IP crossed the pace-of-3 once, despite the client being rebuilt
-    assert slept.count(0.0) == 1, "pace must accumulate across client instances, not reset"
+    assert len(slept) == 1, "pace must accumulate across client instances, not reset"
+
+
+@pytest.mark.asyncio
+async def test_a_pace_limited_ip_rotates_instead_of_sleeping(monkeypatch):
+    """The change that makes the pool fast. With more than one IP, hitting the pace limit
+    must NOT block the caller - the spent IP is parked and the next fresh IP serves the
+    request immediately, no sleep."""
+    monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1,http://ip2:1")
+    monkeypatch.setattr(http_mod, "_PACE_EVERY", 2)
+    monkeypatch.setattr(http_mod, "_PACE_SLEEP_S", 999.0)  # long, to prove we do NOT sleep it
+
+    client = RateLimitedClient()
+    async with client:
+        slept: list[float] = []
+
+        async def fake_sleep(s):
+            slept.append(s)
+
+        monkeypatch.setattr(http_mod.asyncio, "sleep", fake_sleep)
+
+        seen: list[int] = []
+
+        def make(idx):
+            async def h(*a, **k):
+                seen.append(idx)
+                return httpx.Response(200, request=httpx.Request("GET", "https://k/x"))
+            return h
+
+        for i, c in enumerate(client._clients):
+            monkeypatch.setattr(c, "request", make(i))
+
+        # IP0 serves 2, hits pace, parks; IP1 serves the next 2; IP2 the next 2 - no sleeps
+        for _ in range(6):
+            await client.get("https://kap.org.tr/x")
+
+        assert seen == [0, 0, 1, 1, 2, 2]
+        assert slept == [], "a pool must rotate on pace, never sleep while a fresh IP exists"
 
 
 @pytest.mark.asyncio
 async def test_a_blocked_ip_rotates_to_a_fresh_one(monkeypatch):
-    """The whole point: IP 0 throws the WAF disconnect, and the request succeeds through
-    IP 1 rather than failing. IP 0 is parked cooling."""
+    """IP 0 throws the WAF disconnect, and the request succeeds through IP 1 rather than
+    failing. IP 0 is parked cooling."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1,http://ip2:1")
     client = RateLimitedClient()
 
@@ -159,9 +196,9 @@ async def test_a_blocked_ip_rotates_to_a_fresh_one(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_all_ips_cooling_surfaces_the_waf_condition(monkeypatch):
-    """When every IP is spent, the pool has nothing to give: surface RemoteProtocolError so
-    the scraper defers, rather than busy-looping."""
+async def test_whole_pool_blocking_in_one_call_surfaces_the_waf(monkeypatch):
+    """When every IP in the pool blocks within a single call, there is nothing left to try
+    now: surface RemoteProtocolError so the scraper defers, rather than busy-looping."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1")
     client = RateLimitedClient()
 
@@ -175,20 +212,13 @@ async def test_all_ips_cooling_surfaces_the_waf_condition(monkeypatch):
         with pytest.raises(httpx.RemoteProtocolError):
             await client.get("https://kap.org.tr/x")
 
-        # both parked
-        assert all(t > time.monotonic() for t in client._cooling_until)
-
-        # a second call, with every IP still cooling, also surfaces rather than hanging
-        with pytest.raises(httpx.RemoteProtocolError):
-            await client.get("https://kap.org.tr/x")
+        assert all(t > time.monotonic() for t in client._cooling_until)  # both parked
 
 
 @pytest.mark.asyncio
 async def test_a_healthy_ip_is_drained_not_round_robined(monkeypatch):
-    """Requests are sequential, so the pool does not parallelise - its value is avoiding
-    the block stall. The right policy is therefore to use one IP at full speed until it
-    blocks and only then rotate, so each IP's whole ~50-request budget is spent before we
-    move on. An IP that keeps succeeding keeps serving."""
+    """With the pacer off, requests are sequential and a healthy IP just keeps serving -
+    it is drained, not spread across the pool one request at a time."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1,http://ip2:1")
     client = RateLimitedClient()
 
@@ -212,8 +242,8 @@ async def test_a_healthy_ip_is_drained_not_round_robined(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rotation_advances_only_when_the_current_ip_blocks(monkeypatch):
-    """IP0 serves once, then blocks; the retry lands on IP1, which then serves the rest.
-    So the sequence is 0 (ok), 0 (block -> rotate), 1 (ok), 1 (ok)."""
+    """IP0 serves once, then blocks; the retry lands on IP1, which serves the rest.
+    Sequence: 0 (ok), 0 (block -> rotate), 1 (ok), 1 (ok)."""
     monkeypatch.setenv("KAP_PROXIES", "http://ip0:1,http://ip1:1")
     client = RateLimitedClient()
 

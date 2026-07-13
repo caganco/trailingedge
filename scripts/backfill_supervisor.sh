@@ -17,8 +17,6 @@ LOG=backfill.log
 TOTAL_MONTHS=139
 
 success_count() {
-  # init_db() logs "db_connected" to stdout, so take only the pure-integer line the query
-  # prints - never trust the last line blindly.
   uv run python - <<'PY' 2>/dev/null | grep -oE '^[0-9]+$' | tail -1
 import asyncio, sys
 sys.path.insert(0, "src")
@@ -35,24 +33,48 @@ asyncio.run(m())
 PY
 }
 
-prev=-1
+# Total stored disclosures. This, not the SUCCESS month count, is the progress signal: during
+# the forward scan SUCCESS barely moves (fresh months land as PARTIAL), but the disclosure
+# count climbs every pass. It only plateaus once the frontier has reached the present AND the
+# sweeps stop recovering deferred filings - which is the true convergence.
+disclosure_count() {
+  uv run python - <<'PY' 2>/dev/null | grep -oE '^[0-9]+$' | tail -1
+import asyncio, sys
+sys.path.insert(0, "src")
+from sqlalchemy import text
+from trailing_edge.core.db import get_session, init_db
+async def m():
+    await init_db()
+    async with get_session() as s:
+        n = (await s.execute(text("SELECT count(*) FROM kap_disclosures"))).scalar()
+        print(int(n or 0))
+asyncio.run(m())
+PY
+}
+
+prev_succ=-1
+prev_disc=-1
 pass_num=0
 while true; do
   pass_num=$((pass_num + 1))
-  cur=$(success_count)
-  echo "{\"event\":\"SUPERVISOR\",\"pass\":$pass_num,\"success\":$cur,\"prev\":$prev}" >> "$LOG"
+  succ=$(success_count)
+  disc=$(disclosure_count)
+  echo "{\"event\":\"SUPERVISOR\",\"pass\":$pass_num,\"success\":$succ,\"disclosures\":$disc}" >> "$LOG"
 
-  if [ "$cur" -ge "$TOTAL_MONTHS" ]; then
-    echo "{\"event\":\"SUPERVISOR\",\"done\":true,\"reason\":\"success>=months\",\"success\":$cur}" >> "$LOG"
+  if [ "$succ" -ge "$TOTAL_MONTHS" ]; then
+    echo "{\"event\":\"SUPERVISOR\",\"done\":true,\"reason\":\"success>=months\",\"success\":$succ}" >> "$LOG"
     break
   fi
-  # Converged: a whole pass added no new SUCCESS month. The remainder is WAF-stubborn or
-  # structurally PARTIAL (a genuinely lost disclosure), not something another pass fixes.
-  if [ "$pass_num" -gt 1 ] && [ "$cur" -le "$prev" ]; then
-    echo "{\"event\":\"SUPERVISOR\",\"done\":true,\"reason\":\"plateau\",\"success\":$cur}" >> "$LOG"
+  # Converged only when a WHOLE pass moved NEITHER the SUCCESS month count NOR the disclosure
+  # count. SUCCESS alone is the wrong signal - it is flat all through the forward scan while
+  # disclosures pour in. Requiring both to stall means the frontier has reached the present
+  # and the sweeps have stopped recovering anything.
+  if [ "$pass_num" -gt 1 ] && [ "$succ" -le "$prev_succ" ] && [ "$disc" -le "$prev_disc" ]; then
+    echo "{\"event\":\"SUPERVISOR\",\"done\":true,\"reason\":\"plateau\",\"success\":$succ,\"disclosures\":$disc}" >> "$LOG"
     break
   fi
-  prev=$cur
+  prev_succ=$succ
+  prev_disc=$disc
 
   uv run python scripts/backfill_kap_insider.py --from 2015-01-01 >> "$LOG" 2>&1
   echo "{\"event\":\"SUPERVISOR\",\"run_exited\":true,\"pass\":$pass_num}" >> "$LOG"

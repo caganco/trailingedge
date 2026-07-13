@@ -281,12 +281,18 @@ async def main_async(
         # every remaining month behind it. Log it and move on.
         try:
             await _run_chunk(from_date, to_date)
-        except RuntimeError as exc:
+        except Exception as exc:
+            # ANY unhandled per-chunk failure is contained, not just the RuntimeError from
+            # exhausted WAF backoffs. A dead proxy returning 402 Payment Required crashed a
+            # whole run once because it surfaced as httpx.ProxyError, which the narrower
+            # `except RuntimeError` did not catch. The month's ledger record is written by
+            # scraper.run() before it re-raises, so a sweep collects it; one bad month must
+            # never abandon the months behind it, whatever killed it.
             _log.warning(
                 "chunk_abandoned",
                 from_date=from_date,
                 to_date=to_date,
-                error=str(exc),
+                error=f"{type(exc).__name__}: {exc}",
             )
         await asyncio.sleep(_CHUNK_GAP_S)
 

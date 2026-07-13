@@ -49,15 +49,20 @@ async def test_a_chunk_that_raises_does_not_abandon_the_months_behind_it(monkeyp
 
     async def fake_run_chunk(frm, to):
         attempted.append((frm, to))
+        if frm == date(2015, 1, 1):
+            # exhausted WAF backoffs
+            raise RuntimeError("Chunk 2015-01 failed after 3 WAF backoffs")
         if frm == date(2015, 2, 1):
-            # the month that exhausts its WAF backoffs
-            raise RuntimeError("Chunk 2015-02 failed after 3 WAF backoffs")
+            # a dead proxy: this is the class that used to escape the RuntimeError-only catch
+            import httpx
+
+            raise httpx.ProxyError("402 Payment Required")
 
     monkeypatch.setattr(mod, "_run_chunk", fake_run_chunk)
 
     await mod.main_async(date(2015, 1, 1), dry_run=False)
 
-    # every month was attempted - the bad one in the middle did not abandon March
+    # every month was attempted - neither the RuntimeError nor the ProxyError abandoned March
     assert attempted == months
 
 

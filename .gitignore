@@ -67,4 +67,4 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Proxy list for the KAP scraper rotation pool - a credential, never commit.
-proxies.txt
+proxies.txt*
