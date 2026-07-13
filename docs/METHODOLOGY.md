@@ -226,6 +226,23 @@ known - stripping routine trades RAISES gross alpha - but it would have to raise
 past +1.94%, which is more than CMP's own effect size, and the disclosure threshold has
 already removed most of what would do the raising.
 
+### Split-sample stability - the conclusion holds in both halves
+
+Not a regime test - see §6 - but a check that the result is not carried by one stretch of
+the sample. The same cost test, run separately on each half of the available window:
+
+    period        N     gross%   cost%    net%       t     verdict
+    2015-2016    859     +2.30    3.57   -1.27    -3.04    loses money
+    2017-2018    197     +0.30    2.17   -1.87    -1.57    inconclusive (N < 200)
+
+**Net abnormal return is negative in both halves.** The second is inconclusive rather than
+confirming, but only because N = 197 falls under the pre-registered minimum of 200 - the
+sign and the direction agree; the power does not.
+
+Worth recording without over-reading: the *gross* alpha collapses from +2.30% to +0.30%
+between the halves. That could be the market becoming more efficient, or it could be
+sampling noise at N = 197. It is not interpreted here, because at that N it cannot be.
+
 ## 6. Still open
 
 **Regime.** The window is 2015-2018. That spans the August 2018 currency crisis but not
