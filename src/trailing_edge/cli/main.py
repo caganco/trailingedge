@@ -1,5 +1,6 @@
 """CLI entrypoint for trailingedge."""
 import asyncio
+import sys
 from datetime import date, timedelta
 
 import click
@@ -10,6 +11,21 @@ from trailing_edge.core.time import now_tr
 from trailing_edge.scrapers.kap.insider import KapInsiderScraper
 
 _log = get_logger(__name__)
+
+
+# The console this runs on is not guaranteed to be UTF-8. On Windows it is typically
+# cp1254 (Turkish), which cannot encode U+2194 - and a single such character in a
+# docstring took down `trailingedge report --help` with a UnicodeEncodeError. The first
+# command anyone runs against a repository is --help; it must not be the one that breaks.
+#
+# Help text is kept ASCII, and stdout/stderr are reconfigured where the runtime allows it,
+# so a future non-ASCII character degrades to a replacement glyph instead of a traceback.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - console-dependent
+            pass
 
 
 @click.group()
@@ -416,7 +432,7 @@ async def _run_report_generate(ticker: str | None, output: str, all_signals: boo
     help="Output format",
 )
 def report_cross_reference(top: int, person: str | None, output: str) -> None:
-    """Generate cross-reference brief (KAP ↔ TSG)."""
+    """Generate cross-reference brief (KAP <-> TSG)."""
     configure_logging()
     asyncio.run(_run_cross_reference(top, person, output))
 

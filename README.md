@@ -136,16 +136,16 @@ trailingedge scrape kap-insider --last-hours 168     # last week
 trailingedge scrape kap-insider --since 2026-05-01 --until 2026-05-27
 ```
 
-Forensic brief for a single ticker:
+Insider-activity brief for a single ticker (HTML + PDF):
 
 ```bash
-trailingedge report forensic KAPLM
+trailingedge report generate --ticker SARKY
 ```
 
 ## Reproducing the result
 
 ```bash
-trailingedge prices backfill                    # XU100 benchmark
+trailingedge prices backfill                    # XU100 benchmark (yfinance)
 python scripts/load_official_prices.py          # exchange bulletin: survivorship-clean
 trailingedge signal detect                      # clusters + market-adjusted outcomes
 python scripts/check_forward_returns.py         # gross abnormal return, with its gates
