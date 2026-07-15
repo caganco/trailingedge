@@ -40,34 +40,43 @@ disclosed insider **buys** by the actor's connectivity — how many distinct com
 traded, computed **point-in-time** — and by whether the actor is an institution (holding /
 fund / bank) rather than an individual (`scripts/network_signal.py`):
 
-    regime     institutional hub (>=3 companies)   everyone else
-    2015-2018  net +22.3%   t=4.40                 net -1.1%
-    2019-2020  net  +5.3%   t=3.10                 net -15.5%
-    2021-2026  net  -7.3%   t=-2.59                net  -5.6%
+The **mean** looked spectacular — and was a trap:
 
-Connected institutional accumulation — a holding or fund building a position across several
-listed companies — was a **real, point-in-time, net-of-cost edge through 2020**, the single
-strongest result in the project and a validation of the original thesis: the connected actors
-*were* the informed money, and following their disclosed buys paid. It is not overfitting; the
-connectivity is measured only from past trades and the return is after cost.
+    regime     institutional hub, MEAN net   MEDIAN net   liquid* MEDIAN net
+    2015-2018  +22.3%  t=4.40                 -0.7%        -2.7%  (t=1.33, n.s.)
+    2019-2020   +5.3%  t=3.10                 +0.3%        -2.5%
+    2021-2026   -7.3%  t=-2.59                -4.3%        -4.7%
+    *liquid = ADV >= 1,000,000 TRY, i.e. names you could actually trade
 
-Two honest caveats sit next to it:
+**This is a self-caught false positive, and worth keeping as the cautionary tale it is.** The
++22.3% mean in 2015-2018 is driven almost entirely by a handful of extreme outliers on one
+near-untradeable instrument: ISKUR (İş Bankası founder shares) prints returns of +873% but
+trades **~32,000 TRY a day** — a 25,000 TRY order is most of a day's volume, so the return is
+uncapturable in principle. Strip the top 10 events and the hub mean falls from 13.8% to 6.2%;
+the whole result rests on 17 actors and 41 tickers. The **median** hub trade **loses money
+after cost in every regime**, and once the untradeable names are filtered out the mean is
+insignificant even in the best period (t=1.33). Point-in-time connectivity and regime splits
+were done correctly; the error was trusting the mean on skewed, illiquid data — the exact trap
+this project exists to avoid, committed by the person cataloguing it.
 
-- **It decayed.** In 2021-2026 the same signal is net −7.3% (t=−2.59), along with every other
-  signal in the project. Whether that is permanent efficiency or a distortion of the 2021-2023
-  lira/inflation regime cannot be known without more forward data.
-- **The crowd is the opposite of the hub.** A coordinated *pack* — three or more different
-  insiders piling into one name within 20 days — **underperforms**, sharply in the recent
-  regime (net −10%, t=−6.7). Many insiders buying at once is late-stage crowd, not smart money;
-  it is a contrarian tell, not a "pack of wolves" to follow.
+The one robust piece is the mirror image: a coordinated **pack** — three or more different
+insiders piling into one name within 20 days — **underperforms**, sharply in the recent regime
+(net −10%, t=−6.7). Many insiders buying at once is late-stage crowd, and it reads as a
+contrarian tell, not a pack of wolves to follow.
 
 ## Where this leaves it
 
-Retail-accessible, public-signal alpha on BIST equities is, on this evidence, structurally
-thin: the capturable edge is in pre-announcement positioning, which public data can *detect*
-(the run-up) but not *time*. The one exception — following connected institutional insiders —
-was genuinely capturable historically and is the natural thing to keep instrumented, because
-if the edge returns in a new regime, that is where it would show first. The richer network
-layer (board interlocks and ownership, via `graph scrape-management`) is the untested
-enrichment: connections that exist independently of trading, which the trade-only network here
-cannot see.
+There is **no exception**. Every candidate here — insider clusters, holding pairs, bonus and
+tender events, insider-buy leakage, named persistence, share classes, and the network signal —
+fails once held to the same standard: non-overlapping / out-of-sample where relevant, cost per
+trade, the **median** rather than the outlier-inflated mean, and a **liquidity filter** that
+removes names you cannot actually trade. Retail-accessible, public-signal alpha on BIST
+equities is, on this survivorship-clean 2015-2026 evidence, structurally absent.
+
+The alpha itself is real and it is **pre-announcement**: the tender-win run-up at t=7.86 is
+direct, quantitative evidence that someone positions ahead of the public disclosure. Public
+data can *detect* that (the run-up, the sparse volume footprint) but cannot *time* or capture
+it — and the disclosed-insider record does not reveal who does. Capturing it would require
+information or infrastructure that is either non-public (illegal) or unavailable to a retail
+account. That is the honest, defensible finding, and it is worth more than any of the false
+edges that did not survive contact with the median.

@@ -1,25 +1,27 @@
-"""Network signal: do connected institutional insiders carry a capturable edge?
+"""Network signal: do connected institutional insiders carry a capturable edge? (No.)
 
 The premise of the whole project was to trace the connected actors who position ahead of a
-move. Every isolated public signal tested here fails after cost (see docs/METHODOLOGY.md).
-This asks the network version: split disclosed insider BUYS by the actor's connectivity - how
-many distinct companies they have traded in, computed POINT-IN-TIME (past trades only, no
-look-ahead) - and by whether the actor is an institution (holding / fund / bank) rather than
-an individual.
+move. This asks the network version: split disclosed insider BUYS by the actor's connectivity
+- how many distinct companies they have traded in, computed POINT-IN-TIME (past trades only,
+no look-ahead) - and by whether the actor is an institution (holding / fund / bank).
 
-The finding, on the full 2015-2026 archive:
+The MEAN net return of institutional-hub buys looks spectacular (+22% in 2015-2018, t=4.40)
+and is a FALSE POSITIVE - kept here, and reported alongside the median, as the cautionary
+tale. It is driven by a few extreme outliers on near-untradeable instruments, above all ISKUR
+(İş Bankası founder shares: +873% prints on ~32,000 TRY/day of volume - a 25k order is most of
+a day). The MEDIAN hub trade loses money after cost in every regime, and once a liquidity
+filter removes the untradeable names the mean is insignificant even in the best period
+(t=1.33). So this reports mean AND median, and both a full and a liquid-only cut:
 
-    regime   institutional-hub buy (>=3 cos)   everyone else
-    2015-18  net +22.3%  t=4.40                net -0.8%
-    2019-20  net  +5.3%  t=3.10                net -11.6%
-    2021-26  net  -7.3%  t=-2.59               net  -5.6%
+    regime   institutional hub: mean net / MEDIAN net / liquid-only median
+    2015-18  +22.3% / -0.7% / -2.7% (t=1.33 n.s.)
+    2019-20   +5.3% / +0.3% / -2.5%
+    2021-26   -7.3% / -4.3% / -4.7%
 
-Connected institutional accumulation was a real, point-in-time, net-of-cost edge through
-2020 - the single strongest result in the project, and a validation of the "follow the
-connected actors" thesis - and it decayed to negative in 2021-2026 along with every other
-signal. A coordinated PACK (three or more different insiders piling into one name inside 20
-days) is the opposite: it UNDERPERFORMS, sharply so recently (net -10% in 2021-26), i.e. the
-crowd piling in is a contrarian tell, not the smart money.
+Point-in-time connectivity and regime splits were done correctly; the error was trusting the
+mean on skewed illiquid data. The one robust piece is the mirror image: a coordinated PACK
+(>=3 different insiders piling into one name inside 20 days) UNDERPERFORMS - net -10% in
+2021-26 (t=-6.7) - the crowd as a contrarian tell, not a pack to follow.
 
     uv run python scripts/network_signal.py
 """
@@ -74,14 +76,21 @@ def regime(year: int) -> str:
     return "2021-2026"
 
 
-def _report(rows: list[tuple[float, float | None]]) -> tuple[int, float, float, float]:
-    ars = [a for a, _ in rows]
-    nets = [n for _, n in rows if n is not None]
-    mean = statistics.fmean(ars)
-    sd = statistics.stdev(ars) if len(ars) > 1 else 0.0
-    t = mean / (sd / math.sqrt(len(ars))) if sd > 0 else 0.0
-    net = statistics.fmean(nets) if nets else float("nan")
-    return len(ars), mean, net, t
+MIN_ADV_TRY = 1_000_000  # a name below this cannot absorb the order; ISKUR trades ~32k/day
+
+
+def _report(rows: list[tuple]) -> str:
+    """rows: (ar, net, adv). Reports N, mean net, MEDIAN net, and the liquid-only median -
+    because the mean is outlier-driven here and only the median tells the truth."""
+    nets = [n for _, n, _ in rows if n is not None]
+    if not nets:
+        return f"{len(rows):>6}       -       -       -      -"
+    mean = statistics.fmean(nets)
+    sd = statistics.stdev(nets) if len(nets) > 1 else 0.0
+    t = mean / (sd / math.sqrt(len(nets))) if sd > 0 else 0.0
+    liq = [n for _, n, adv in rows if n is not None and adv >= MIN_ADV_TRY]
+    liq_med = statistics.median(liq) if len(liq) >= 10 else float("nan")
+    return f"{len(nets):>6}{mean:>8.2f}{statistics.median(nets):>9.2f}{liq_med:>11.2f}{t:>7.2f}"
 
 
 async def main_async() -> None:
@@ -105,15 +114,18 @@ async def main_async() -> None:
             await s.execute(
                 text(
                     """
-                    SELECT ticker, price_date, close_try, raw_close_try, volume
+                    SELECT ticker, price_date, close_try, high_try, low_try, raw_close_try, volume
                     FROM price_history WHERE close_try > 0 ORDER BY ticker, price_date
                     """
                 )
             )
         ).all()
+        # (date, adj_close, adj_high, adj_low, raw_close, volume)
         series: dict[str, list] = defaultdict(list)
-        for tic, d, adj, raw, vol in px:
-            series[tic].append((d, float(adj), float(raw) if raw else None, vol or 0))
+        for tic, d, c, h, low, raw, vol in px:
+            series[tic].append(
+                (d, float(c), float(h or c), float(low or c), float(raw) if raw else None, vol or 0)
+            )
         xu_rows = (
             await s.execute(
                 text("SELECT price_date, close_try FROM price_history WHERE ticker='XU100' ORDER BY price_date")
@@ -169,34 +181,36 @@ async def main_async() -> None:
                 ar = (p1 / p0 - 1 - mkt) * 100
 
                 net = None
-                raws = [ser[k][2] for k in range(i - 21, i)]
+                adv = 0.0
+                raws = [ser[k][4] for k in range(i - 21, i)]
                 if all(r is not None for r in raws):
                     closes = [Decimal(str(ser[k][1])) for k in range(i - 21, i)]
-                    adv = statistics.fmean(float(raws[q]) * ser[i - 21 + q][3] for q in range(21))
+                    highs = [Decimal(str(ser[k][2])) for k in range(i - 21, i)]
+                    lows = [Decimal(str(ser[k][3])) for k in range(i - 21, i)]
+                    adv = statistics.fmean(float(raws[q]) * ser[i - 21 + q][5] for q in range(21))
                     rt = round_trip_cost(
-                        closes, closes, closes, ORDER, Decimal(str(adv)),
+                        closes, highs, lows, ORDER, Decimal(str(adv)),
                         last_traded_price=Decimal(str(raws[-1])),
                     )
                     net = ar - float(rt.total_pct) if rt else None
 
-                hub_buckets[(regime(pub.year), hub_inst)].append((ar, net))
+                hub_buckets[(regime(pub.year), hub_inst)].append((ar, net, adv))
 
                 pack = len(
                     {n2 for p2, n2 in by_ticker[c]
                      if pub - dt.timedelta(days=PACK_WINDOW_DAYS) <= p2 <= pub}
                 )
-                pack_buckets[(regime(pub.year), pack >= PACK_MIN_BUYERS)].append((ar, net))
+                pack_buckets[(regime(pub.year), pack >= PACK_MIN_BUYERS)].append((ar, net, adv))
 
     def print_table(title: str, buckets: dict, yes_label: str, no_label: str) -> None:
         print(f"\n{title}")
-        print(f"    {'regime':<12}{'group':<16}{'N':>6}{'gross%':>8}{'net%':>8}{'t':>7}")
+        print(f"    {'regime':<12}{'group':<16}{'N':>6}{'mean_net':>8}{'MED_net':>9}{'liq_MED':>11}{'t':>7}")
         for reg in ("2015-2018", "2019-2020", "2021-2026"):
             for flag, label in ((True, yes_label), (False, no_label)):
                 v = buckets.get((reg, flag), [])
                 if len(v) < 25:
                     continue
-                n, mean, net, t = _report(v)
-                print(f"    {reg:<12}{label:<16}{n:>6}{mean:>8.2f}{net:>8.2f}{t:>7.2f}")
+                print(f"    {reg:<12}{label:<16}{_report(v)}")
 
     print_table(
         "Connected institutional insider buys (point-in-time >=3 companies):",
