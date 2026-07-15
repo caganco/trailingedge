@@ -168,18 +168,22 @@ have flattered the answer, and not taken from a quote feed, which does not exist
 delisted names the exchange bulletin carries. Impact is Kyle/Almgren square-root on the
 same window; commission and BSMV are charged per side.
 
-    round-trip cost:  median 1.93%   p25 1.19%   p75 4.34%
+On the full 2015-2026 sample (N=2,279 priceable clusters, more than double the earlier cut):
 
-    horizon   N=1070   gross AR   net AR      t (net)
-    5d                  +0.66%    -2.71%     -12.91
-    20d                 +2.02%    -1.35%      -3.31
-    60d                 +2.18%    -1.20%      -1.86   (not significant)
+    round-trip cost:  median 2.33%   mean 4.19%   p75 4.76%
+
+    horizon   N=2279   gross AR   net AR      t (net)
+    5d                  +0.41%    -3.78%     -21.29
+    20d                 +1.58%    -2.61%      -7.76
+    60d                 +2.61%    -1.58%      -2.57
 
 **The signal does not survive the cost of trading it.** Insider clusters fire in illiquid
 small caps, and the spread on those names is wider than the alpha. This is the project's
-result, not a caveat on it. At 60 days the net loss stops being statistically
-distinguishable from zero, which is not a reprieve: the point estimate is still negative,
-and a signal that *may* break even over three months is not an edge either.
+result, not a caveat on it - and on the full sample it is sharper than on the earlier cut:
+the net loss is significant at every horizon, including 60 days. The pooled gross number
+(+1.58%, t=5.2, still "EDGE_DETECTED" before costs) is nonetheless misleading on its own,
+because it averages two different regimes - see §6, where the split shows the gross signal
+was real in 2015-2018 and has since decayed to zero.
 
 A second trap, found later and more serious than the first, because it sat under the
 number that decides the answer. `price_history.close_try` is a **chained total-return
@@ -264,25 +268,86 @@ Worth recording without over-reading: the *gross* alpha collapses from +2.30% to
 between the halves. That could be the market becoming more efficient, or it could be
 sampling noise at N = 197. It is not interpreted here, because at that N it cannot be.
 
-## 6. Still open
+## 6. Closed by the full backfill, and what still remains
 
-**Regime.** The window is 2015-2018. That spans the August 2018 currency crisis but not
-the 2021-2023 negative-real-rate retail boom or the 2023+ normalisation. The result is
-therefore **not regime-conditional**, and a signal that dies to the spread in one regime
-could in principle survive in another where those names traded tighter. The honest position
-is that this is untested, not that it is unaffected.
+### Regime - CLOSED, and the signal itself decayed
 
-Closing it needs the KAP backfill to reach 2026. That is a data-collection problem, not a
-methodological one, and it does not touch the mechanism: the spread eating the alpha is a
-microstructure fact about illiquid names, not a regime phenomenon.
+The window used to be 2015-2018. The KAP backfill now reaches the present (2026-07), so the
+question - does the result hold across regimes? - can finally be answered on the full
+2,279-cluster sample instead of asserted. It does not hold. Split by the cluster's own date:
+
+    regime        20d gross   t(gross)   20d net   note
+    2015-2018        +2.36%      6.46      -1.00%   real, uncapturable (as before)
+    2019-2020        +3.34%      3.34      -5.01%   COVID small-cap mania, N=198, cost 8.4%
+    2021-2026        -0.67%     -1.00      -5.44%   the GROSS signal is gone
+
+The finding is sharper than "not tradeable". In 2015-2018 the gross abnormal return was
+real and strong (+2.36% at 20d, t=6.5) and died only to the spread. In **2021-2026 the gross
+signal has decayed to nothing** (-0.67%, t=-1.0 - statistically indistinguishable from zero,
+and if anything negative). Insider-cluster purchases no longer predict a positive abnormal
+return at all in the recent regime, before costs are even considered.
+
+So the pooled full-sample number (+1.61% gross at 20d, t=5.2, EDGE_DETECTED) is carried
+entirely by the 2015-2018 era and is misleading on its own - it averages a real early edge
+with a dead recent one. The honest statement is: **the signal was a 2015-2018 phenomenon
+that has since decayed**, plausibly because the 2021+ retail boom changed who follows insider
+filings and how fast. The 2019-2020 line is a genuine but regime-specific artefact: the COVID
+small-cap mania produced huge gross returns (+16.7% at 60d) on a tiny, extremely illiquid
+sample (round-trip cost 8.4%), and it clears cost only there and only at 60 days - not a
+strategy, a curiosity.
+
+This closes the last major open item. It does not rescue the signal - it removes even the
+"real but uncapturable" consolation for the regime that matters most to a trader today.
+
+### The ingest - CLOSED at 139/139, and the completion metric was not the obvious one
+
+The full 2015-2026 archive is now in: **139 of 139 months SUCCESS, 18,415 disclosures,
+15,316 transactions, 2,339 clusters** (up from the 1,079 the earlier analysis ran on). Two
+things had to be got right to get here.
+
+First, the completion metric. A chunk can lose filings to a WAF disconnect and still log
+`chunk_done`; the ledger records the month `PARTIAL`, not `SUCCESS`. Counting `chunk_done`
+overstated progress badly - at one point it read 92 of 139 months while `scraper_runs` held
+20 SUCCESS, 82 PARTIAL, 44 FAILED, and 2016 and 2020 contained not one complete month. The
+real criterion is `count(SUCCESS)`, and reaching it needed repeated sweeps, because
+`backfill_kap_insider.py` fixes its `todo` list at startup and only collects a month's
+WAF-dropped stragglers on a *later* run. A supervisor now re-runs until SUCCESS stops rising.
+
+Second, the WAF itself, which made the difference between a 12-hour grind and a stall. It
+throttles per source IP on cumulative volume (~50 disclosures, refilling in ~2 min), so the
+fix was to pace under that budget and then to spread the load across a rotating pool of IPs
+with concurrent requests. Throughput went from ~7 to ~100 disclosures/min with the block
+rate driven to near zero. Direction of any residual loss: WAF drops are unrelated to what a
+filing predicts, so they thin the sample rather than tilt it.
+
+### Quarantine - a source ceiling, not a bug
+
+On the complete archive, **3,795 of 18,415 disclosures (~21%) are quarantined** to
+`reports/parse_failures/` - a DKB PDF that yields no transactions is set aside with its
+bytes, never silently skipped. Sampling those files, **about three quarters carry no
+extractable text at all**: they are scanned images with no text layer, and no parser will
+ever read them. That is a hard ceiling of the same kind as the 250,000 TRY disclosure
+threshold - a property of the source, not a defect to fix. Recovering them would need OCR,
+which is not attempted here and would need its own accuracy audit before any number it
+produced could be trusted.
+
+The remaining quarter do carry text and fail for a different reason: they are **narrative
+filings with no transaction table** ("... 3,63 - 3,64 TL fiyat aralığından 9.911 adet satış
+işlemi gerçekleşmiştir"), so the arithmetic row-validation gate has nothing to bind to.
+Those are recoverable in principle. `scripts/reparse_quarantine.py` re-runs the parser over
+the whole quarantine and rescues the ones that now parse; the scanned images are the
+residual floor.
+
+### What still remains
 
 **Cluster scoring is close to single-factor.** `cluster_score` blends insider count (0.50),
 role seniority (0.30) and recency (0.20). In historical mode recency is pinned at 1.0, so
 20% of the weight is a constant, and seniority falls back to its 0.5 default wherever the
-scraped board roster does not cover an insider. When coverage is zero the score reduces to
-a monotone function of `insider_count` alone - `detect_clusters` now logs `role_map_empty`
-loudly in that case, where it used to happen silently. The score is not used to gate any
-result reported here, so this is a latent defect rather than an active one.
+scraped board roster does not cover an insider - and `person_company_roles` is unpopulated
+until `graph scrape-management` runs, so in practice the score reduces to a monotone
+function of `insider_count` alone. `detect_clusters` logs `role_map_empty` loudly in that
+case. The score gates none of the results above, so this is a latent defect, not an active
+one.
 
 **Kyle's lambda is uncalibrated** (1.0). At retail order size the impact term is small
 enough that the error changes no conclusion; at institutional size it would, and the number

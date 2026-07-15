@@ -21,19 +21,33 @@ disclosure is *public*, returns are measured in excess of XU100 over the same he
 interval, and the round-trip cost is estimated per trade from that stock's own OHLC
 (Abdi-Ranaldo 2017) rather than assumed as a flat fee.
 
+Full 2015-2026 history, **2,279 survivorship-clean insider-cluster events**:
+
 | Horizon | N | Gross AR | Cost | **Net AR** | t (net) |
 |---|---:|---:|---:|---:|---:|
-| 5d | 1,070 | +0.66% | 3.37% | **−2.71%** | −12.91 |
-| 20d | 1,070 | +2.02% | 3.37% | **−1.35%** | −3.31 |
-| 60d | 1,071 | +2.18% | 3.37% | **−1.20%** | −1.86 |
+| 5d | 2,279 | +0.41% | 4.19% | **−3.78%** | −21.29 |
+| 20d | 2,279 | +1.58% | 4.19% | **−2.61%** | −7.76 |
+| 60d | 2,236 | +2.61% | 4.19% | **−1.58%** | −2.57 |
 
-**The signal is real. The gross abnormal return is significantly positive at every
-horizon** (20d: +2.07%, t = 5.36, N = 1,079). **And it is not tradeable**, because insider
-clusters fire in illiquid small caps whose bid-ask spread is wider than the alpha: the
-median round trip costs 1.93%, the upper quartile 4.34%. Nothing survives crossing it
-twice. At 60 days the net loss is no longer statistically distinguishable from zero
-(t = −1.86) - which buys nothing: the point estimate is still negative, and "you might
-merely break even after three months" is not an edge either.
+**The pooled gross signal is real** (20d: +1.58%, t = 5.2, `EDGE_DETECTED`) **and not
+tradeable** — insider clusters fire in illiquid small caps whose bid-ask spread (median
+round trip 2.33%) is wider than the alpha. Net negative at every horizon.
+
+**But the full history says something sharper than "not tradeable".** Split by regime, the
+gross signal was strong in 2015-2018 (+2.36% at 20d, t = 6.5) and has **decayed to nothing
+in 2021-2026** (−0.67%, t = −1.0 — indistinguishable from zero, before costs):
+
+| Regime | 20d Gross AR | t (gross) | 20d Net AR |
+|---|---:|---:|---:|
+| 2015-2018 | +2.36% | 6.46 | −1.00% |
+| 2019-2020 | +3.34% | 3.34 | −5.01% |
+| **2021-2026** | **−0.67%** | **−1.00** | −5.44% |
+
+So the pooled number is carried entirely by the early era. Insiders' disclosed purchases
+predicted abnormal returns in 2015-2018 — returns you still could not capture after the
+spread — and in the regime that matters to a trader today they no longer predict them at
+all. The edge was real, uncapturable, and has since decayed. (2019-2020 is a COVID
+small-cap-mania artefact on a tiny, extremely illiquid sample, not a strategy.)
 
 That is the whole finding, and it is why this repository exists. A gross number is not
 an edge; an edge is what is left after the market takes its cut.
@@ -95,12 +109,12 @@ verdict standing.
   `INSUFFICIENT_POWER` below ~784 events and `SURVIVORSHIP_BIASED` when too many
   clusters cannot be priced. Both gates fired during this work, and both were right.
 
-> **What is claimed, precisely:** a statistically strong *gross* abnormal return
-> (20d: +2.07%, t = 5.36, N = 1,079, survivorship-clean) that does **not** survive a
-> per-trade cost estimate. The window is 2015-2018 - a single regime - so the result is
-> not yet regime-conditional, and that is stated rather than glossed. Remaining gaps are
-> in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md#6-still-open), not left for a
-> reader to discover.
+> **What is claimed, precisely:** across the full 2015-2026 history (N = 2,279,
+> survivorship-clean), a *gross* abnormal return that does **not** survive a per-trade cost
+> estimate at any horizon — and that, split by regime, was statistically strong in 2015-2018
+> (20d +2.36%, t = 6.5) and has **decayed to zero in 2021-2026** (−0.67%, t = −1.0). The edge
+> was real, uncapturable, and is now gone. Remaining gaps are in
+> [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md), not left for a reader to discover.
 
 ## Türkçe özet
 
@@ -173,13 +187,13 @@ python scripts/net_of_cost.py                   # the one that decides it
 ```
 === Abnormal return, NET of round-trip cost (order 25,000 TRY) ===
     spread: Abdi-Ranaldo (2017) from the stock's own OHLC, per trade
-    dropped (no cost estimate): 27
-    round-trip cost: median 1.93%  p25 1.19%  p75 4.34%
+    dropped (no cost estimate): 36
+    round-trip cost: median 2.33%  p25 1.34%  p75 4.76%
 
 HORIZON     N  GROSS AR%   COST%  NET AR%   HIT%          95% CI      t  VERDICT
-     5d  1070       0.66    3.37    -2.71   26.9    [24.3, 29.7] -12.91  LOSES MONEY (net)
-    20d  1070       2.02    3.37    -1.35   41.3    [38.4, 44.3]  -3.31  LOSES MONEY (net)
-    60d  1071       2.18    3.37    -1.20   44.4    [41.5, 47.4]  -1.86  NO EDGE (net)
+     5d  2280       0.41    4.19    -3.78   26.1    [24.4, 28.0] -21.29  LOSES MONEY (net)
+    20d  2279       1.58    4.19    -2.61   39.8    [37.8, 41.8]  -7.76  LOSES MONEY (net)
+    60d  2236       2.61    4.19    -1.58   42.4    [40.4, 44.5]  -2.57  LOSES MONEY (net)
 ```
 
 The spread is not a parameter. It is estimated for each trade from the 30 sessions of
